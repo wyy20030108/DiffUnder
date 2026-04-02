@@ -1,0 +1,39 @@
+# ==========================================
+# Arguments for Dataset (ACDC)
+# ==========================================
+dataset: ACDC
+nclass: 4                # 🚨 修正: ACDC 标准为 4 类 (0:背景, 1:右心室RV, 2:心肌Myo, 3:左心室LV)
+labeled_cases: 14         # 🚨 修正: 建议使用病人数量 (7对应10%, 14对应20%)，而不是模糊的 labelnum
+crop_size: [256, 256]
+val_patch_size: [256, 256] 
+
+# ==========================================
+# Arguments for DataLoader
+# ==========================================
+batch_size: 8          
+num_workers: 8
+
+# ==========================================
+# Arguments for Model
+# ==========================================
+model: unet_2d          
+backbone: resnet34       
+baseline: unet
+lock_backbone: False
+
+# ==========================================
+# Arguments for Semi-Supervised Training
+# ==========================================
+epochs: 200
+conf_thresh: 0.95        
+unsup_loss_weight: 0.1   
+
+# ==========================================
+# Arguments for Optimizer & Scheduler
+# ==========================================
+optimizer:
+  name: SGD             
+  kwargs:
+    lr: 0.01             
+    momentum: 0.9
+    weight_decay: 0.0001

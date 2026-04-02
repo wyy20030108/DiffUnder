@@ -1,23 +1,39 @@
-# arguments for dataset, AK-1K needed padding
+# ==========================================
+# Arguments for Dataset (ACDC)
+# ==========================================
 dataset: ACDC
-nclass: 5 
-labelnum: 50 # 50 for 1:16; 80 for 1:10; 160 for 1:5
-crop_size: [64, 128, 128]
-val_patch_size: [64, 128, 128]
+nclass: 4                # 🚨 修正: ACDC 标准为 4 类 (0:背景, 1:右心室RV, 2:心肌Myo, 3:左心室LV)
+labeled_cases: 3
+crop_size: [256, 256]
+val_patch_size: [256, 256] 
 
-# arguments for training
-epochs: 200
-batch_size: 4   # must be even because of the cutmix!
-lr: 0.1
-criterion:
-  name: CELoss
-  kwargs:
-    ignore_index: 255
-conf_thresh: 0.95
+# ==========================================
+# Arguments for DataLoader
+# ==========================================
+batch_size: 8          
+num_workers: 8
 
-
-# arguments for model
-model: unet_3d
-backbone: cnn
+# ==========================================
+# Arguments for Model
+# ==========================================
+model: unet_2d          
+backbone: resnet34       
 baseline: unet
 lock_backbone: False
+
+# ==========================================
+# Arguments for Semi-Supervised Training
+# ==========================================
+epochs: 200
+conf_thresh: 0.95        
+unsup_loss_weight: 0.1   
+
+# ==========================================
+# Arguments for Optimizer & Scheduler
+# ==========================================
+optimizer:
+  name: SGD             
+  kwargs:
+    lr: 0.01             
+    momentum: 0.9
+    weight_decay: 0.0001
