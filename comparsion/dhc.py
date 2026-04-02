@@ -24,7 +24,7 @@ from torch.cuda.amp import GradScaler, autocast
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
-from datasets.efficient import Flare_fixmatch_Dataset_effi, TwoStreamBatchSampler, mix_collate_fn
+from Datasets.efficient import Flare_fixmatch_Dataset_effi, TwoStreamBatchSampler, mix_collate_fn
 from models.model import unet_3D_wtcls, kaiming_normal_init_weight
 from utils.classes import CLASSES
 from utils.datasets import DATASET_CONFIGS

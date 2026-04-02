@@ -13,8 +13,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
-from datasets.efficient import SemiDataset2D, TwoStreamBatchSampler, mix_collate_fn
-from models.model import unet_3D_wtcls, kaiming_normal_init_weight
+from Datasets.efficient import SemiDataset2D, TwoStreamBatchSampler, mix_collate_fn
+from models.unet2d import UNet, kaiming_normal_init_weight
 from utils.classes import CLASSES
 from utils.datasets import DATASET_CONFIGS
 from utils.util import count_params, init_log, AverageMeter, DiceLoss
@@ -36,23 +36,10 @@ def get_parser(datasetname):
     # parser.add_argument('--wandb_entity', type=str, default='stap1e-ucas', help='wandb entity/username (optional)')
     parser.add_argument('--consistency', type=float, default=1, help='consistency')
     parser.add_argument('--normal', type=bool, help='celoss normal or something-aware')
-    parser.add_argument('--checkpoint_path', type=str, default='/data/lhy_data/checkpoints')
+    parser.add_argument('--checkpoint_path', type=str, default='/data/lhy_data/checkpoints_wyy')
     parser.add_argument('--deterministic', type=str, default=False)
-    parser.add_argument('--val_patch_stats_num', type=int, default=24)
 
     return parser
-
-
-def forward_with_auto_padding(model, x, divisor=16):
-    d, h, w = x.shape[-3], x.shape[-2], x.shape[-1]
-    pad_d = (divisor - d % divisor) % divisor
-    pad_h = (divisor - h % divisor) % divisor
-    pad_w = (divisor - w % divisor) % divisor
-    if pad_d == 0 and pad_h == 0 and pad_w == 0:
-        return model(x)
-    x_pad = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d), mode='constant', value=0)
-    y_pad = model(x_pad)
-    return y_pad[..., :d, :h, :w]
 
 def main(args, cfg, save_path, cp_path):
     logger = init_log('global', logging.INFO, os.path.join(save_path, args.exp))
@@ -72,7 +59,7 @@ def main(args, cfg, save_path, cp_path):
     # )
     # # ========================================
 
-    model = unet_3D_wtcls(in_chns=1, class_num=cfg['nclass']).cuda()
+    model = UNet(in_chns=1, class_num=cfg['nclass']).cuda()
     model = kaiming_normal_init_weight(model).cuda()
     
     model_ema = deepcopy(model)

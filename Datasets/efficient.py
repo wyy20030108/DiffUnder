@@ -1,5 +1,5 @@
 import itertools, torch
-import os
+import os, sys
 import numpy as np
 from torch.utils.data.sampler import Sampler
 from torch.utils.data import DataLoader, ConcatDataset
@@ -9,7 +9,9 @@ import h5py
 from copy import deepcopy
 from PIL import Image
 
-from datasets.transform import *
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(project_root)
+from Datasets.transform import *
 
 class TwoStreamBatchSampler(Sampler):
     """Iterate two sets of indices"""
