@@ -66,88 +66,122 @@ def mix_collate_fn(batch):
     # 分别进行 collate
     return default_collate(labeled_batch), default_collate(unlabeled_batch)
 
+# class Flare_fixmatch_Dataset_effi(Dataset):
+#     """ Flare2022 Dataset with cutmix """
+#     def __init__(self, mode, args, size):
+#         self.dir = args.base_dir
+#         self.size = size
+#         self.mode = mode
+#         if mode == 'val_test':
+#             self.path = self.dir + f'/val.txt'
+#         else:
+#             self.path = self.dir + f'/{mode}.txt' 
+#         with open(self.path, 'r') as f:
+#             self.name_list = f.readlines()
+#         self.name_list = [item.replace('\n', '') for item in self.name_list]
+        
+#         if mode == 'train_u' and args.num is not None:
+#             self.name_list = self.name_list[:args.num]
+        
+#         if mode == 'train_l' and args.labelnum is not None:
+#             self.name_list = self.name_list[:args.labelnum]
+        
+#         print(f"{mode} data number is: {len(self.name_list)}")
 
+#     def __getitem__(self, idx):
+#         id = self.name_list[idx]
+#         if self.mode.split('_')[0] == 'train':
+#             if self.mode == 'train_u':
+#                 flag = 'unlabeled'
+#             elif self.mode == 'train_l':
+#                 flag = 'labeled'
+#             else:
+#                 raise ValueError(f"self.mode: {self.mode} is error, must among 'train_l', 'train_u' or 'val'")
+            
+#             h5f = h5py.File(self.dir + f"/{flag}_h5/{id}.h5", 'r')
+#             img = h5f['image'][:]
+            
+#             if self.mode == 'train_l':
+#                 mask = h5f['label'][:]
+#             elif self.mode == 'train_u':
+#                 mask = np.zeros((img.shape[0], img.shape[1], img.shape[2]), dtype=np.uint8)
+            
+#             h5f.close()
+#             ignore_value = 254 if self.mode == 'train_u' else 255
+#             img, mask = crop_3d(img, mask, self.size, ignore_value)
+            
+#             if self.mode == 'train_l':
+#                 return normalize_3d_new(img, mask)             
+             
+#             img_w, img_s = deepcopy(img), deepcopy(img)
 
-class Flare_fixmatch_Dataset_effi(Dataset):
-    """ Flare2022 Dataset with cutmix """
-    def __init__(self, mode, args, size):
-        self.dir = args.base_dir
-        self.size = size
-        self.mode = mode
-        if mode == 'val_test':
-            self.path = self.dir + f'/val.txt'
-        else:
-            self.path = self.dir + f'/{mode}.txt' 
-        with open(self.path, 'r') as f:
-            self.name_list = f.readlines()
-        self.name_list = [item.replace('\n', '') for item in self.name_list]
+#             img_s = BrightnessMultiplicativeTransforms(img_s, 0.5, (0.5, 1.5))
+#             img_s = ContrastAugmentationTransforms(img_s, 0.5, (0.5, 1.5))
+#             img_s = GammaTransforms(img_s, 0.5, (0.5, 1.5), retain_stats=True, invert_image=False)
+            
+#             cutmix_box = obtain_cutmix_box_3d(img_s)
+            
+#             ignore_mask = np.zeros((mask.shape[0], mask.shape[1], mask.shape[2]), dtype=np.uint8)
+#             img_s, ignore_mask = normalize_3d_new(img_s, ignore_mask)
+            
+#             mask = torch.from_numpy(np.array(mask)).long()
+#             ignore_mask[mask == 254] = 255
+            
+#             return normalize_3d_new(img_w), img_s, ignore_mask, cutmix_box
+    
+#         if self.mode == 'val':
+#             h5f = h5py.File(self.dir + f"/labeled_h5/{id}.h5", 'r')
+#             img, mask = h5f['image'][:], h5f['label'][:]
+#             img, mask = normalize_3d_new(img, mask)   
+#             return img, mask
         
-        if mode == 'train_u' and args.num is not None:
-            self.name_list = self.name_list[:args.num]
-        
-        if mode == 'train_l' and args.labelnum is not None:
-            self.name_list = self.name_list[:args.labelnum]
-        
-        print(f"{mode} data number is: {len(self.name_list)}")
+#         if self.mode == 'val_test':
+#             h5f = h5py.File(self.dir + f"/labeled_h5/{id}.h5", 'r')
+#             img, mask = h5f['image'][:], h5f['label'][:]
+#             ignore_value = 255
+#             img, mask = crop_3d(img, mask, self.size, ignore_value)
+#             img, mask = normalize_3d_new(img, mask)
+#             return img, mask
+    
+#     def __len__(self):
+#         return len(self.name_list)
+
+class BraTS2019(Dataset):
+    """ BraTS2019 Dataset """
+
+    def __init__(self, base_dir=None, split='train', num=None, transform=None):
+        self._base_dir = base_dir
+        self.transform = transform
+        self.sample_list = []
+
+        train_path = self._base_dir+'/train.txt'
+        test_path = self._base_dir+'/val.txt'
+
+        if split == 'train':
+            with open(train_path, 'r') as f:
+                self.image_list = f.readlines()
+        elif split == 'test':
+            with open(test_path, 'r') as f:
+                self.image_list = f.readlines()
+
+        self.image_list = [item.replace('\n', '').split(",")[0] for item in self.image_list]
+        if num is not None:
+            self.image_list = self.image_list[:num]
+        print("total {} samples".format(len(self.image_list)))
+
+    def __len__(self):
+        return len(self.image_list)
 
     def __getitem__(self, idx):
-        id = self.name_list[idx]
-        if self.mode.split('_')[0] == 'train':
-            if self.mode == 'train_u':
-                flag = 'unlabeled'
-            elif self.mode == 'train_l':
-                flag = 'labeled'
-            else:
-                raise ValueError(f"self.mode: {self.mode} is error, must among 'train_l', 'train_u' or 'val'")
-            
-            h5f = h5py.File(self.dir + f"/{flag}_h5/{id}.h5", 'r')
-            img = h5f['image'][:]
-            
-            if self.mode == 'train_l':
-                mask = h5f['label'][:]
-            elif self.mode == 'train_u':
-                mask = np.zeros((img.shape[0], img.shape[1], img.shape[2]), dtype=np.uint8)
-            
-            h5f.close()
-            ignore_value = 254 if self.mode == 'train_u' else 255
-            img, mask = crop_3d(img, mask, self.size, ignore_value)
-            
-            if self.mode == 'train_l':
-                return normalize_3d_new(img, mask)             
-             
-            img_w, img_s = deepcopy(img), deepcopy(img)
-
-            img_s = BrightnessMultiplicativeTransforms(img_s, 0.5, (0.5, 1.5))
-            img_s = ContrastAugmentationTransforms(img_s, 0.5, (0.5, 1.5))
-            img_s = GammaTransforms(img_s, 0.5, (0.5, 1.5), retain_stats=True, invert_image=False)
-            
-            cutmix_box = obtain_cutmix_box_3d(img_s)
-            
-            ignore_mask = np.zeros((mask.shape[0], mask.shape[1], mask.shape[2]), dtype=np.uint8)
-            img_s, ignore_mask = normalize_3d_new(img_s, ignore_mask)
-            
-            mask = torch.from_numpy(np.array(mask)).long()
-            ignore_mask[mask == 254] = 255
-            
-            return normalize_3d_new(img_w), img_s, ignore_mask, cutmix_box
-    
-        if self.mode == 'val':
-            h5f = h5py.File(self.dir + f"/labeled_h5/{id}.h5", 'r')
-            img, mask = h5f['image'][:], h5f['label'][:]
-            img, mask = normalize_3d_new(img, mask)   
-            return img, mask
+        image_name = self.image_list[idx]
+        h5f = h5py.File(self._base_dir + "/data/{}.h5".format(image_name), 'r')
+        image = h5f['image'][:]
+        label = h5f['label'][:]
+        sample = {'image': image, 'label': label.astype(np.uint8)}
+        if self.transform:
+            sample = self.transform(sample)
+        return sample
         
-        if self.mode == 'val_test':
-            h5f = h5py.File(self.dir + f"/labeled_h5/{id}.h5", 'r')
-            img, mask = h5f['image'][:], h5f['label'][:]
-            ignore_value = 255
-            img, mask = crop_3d(img, mask, self.size, ignore_value)
-            img, mask = normalize_3d_new(img, mask)
-            return img, mask
-    
-    def __len__(self):
-        return len(self.name_list)
-
 
 class SemiDataset2D(Dataset):
     def __init__(self, mode, cfg=None, size=None, args=None):

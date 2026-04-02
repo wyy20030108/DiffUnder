@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
-from datasets.efficient import Flare_fixmatch_Dataset_effi, TwoStreamBatchSampler, mix_collate_fn
+from datasets.efficient import SemiDataset2D, TwoStreamBatchSampler, mix_collate_fn
 from models.model import unet_3D_wtcls, kaiming_normal_init_weight
 from utils.classes import CLASSES
 from utils.datasets import DATASET_CONFIGS
@@ -93,10 +93,10 @@ def main(args, cfg, save_path, cp_path):
     logger.info('Total params: {:.3f}M'.format(count_params(model)))
 
     # 1. 创建 Dataset 实例
-    trainset_u = Flare_fixmatch_Dataset_effi('train_u', args, cfg['crop_size'])
-    trainset_l = Flare_fixmatch_Dataset_effi('train_l', args, cfg['crop_size']) 
+    trainset_u = SemiDataset2D('train_u', args, cfg['crop_size'])
+    trainset_l = SemiDataset2D('train_l', args, cfg['crop_size']) 
 
-    valset = Flare_fixmatch_Dataset_effi('val', args, cfg['crop_size'])
+    valset = SemiDataset2D('val', args, cfg['crop_size'])
     valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=1, drop_last=False)
 
     # 2. 定义 Batch Size 分配
