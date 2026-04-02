@@ -1,8 +1,8 @@
 import os, sys
-# 🔴 核心修复 1：必须在 import huggingface 之前设置镜像环境变量！
+# 🔴 必须在 import huggingface 之前设置镜像环境变量！
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
-# 🔴 核心修复 2：强制清除可能存在的“死代理”，让镜像直连！
+# 🔴 强制清除可能存在的“死代理”，让镜像直连！
 os.environ.pop("http_proxy", None)
 os.environ.pop("https_proxy", None)
 os.environ.pop("HTTP_PROXY", None)
