@@ -1,8 +1,8 @@
 #!/bin/bash
-GPUID=1
+GPUID=0
 
 CUDA_VISIBLE_DEVICES=$GPUID python train.py \
- --cli_dataset "10acdc" \
+ --cli_dataset "20acdc" \
  --seed 2025 \
- --exp "Ours" \
+ --exp "Ours-lr0.1" \
  --device "cuda:$GPUID"

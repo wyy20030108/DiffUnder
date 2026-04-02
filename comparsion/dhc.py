@@ -18,7 +18,8 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
+from torch.amp import autocast
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
@@ -53,7 +54,7 @@ def get_parser(datasetname):
     parser.add_argument('--consistency_rampup', type=float, default=None)
     parser.add_argument('--accumulate_iters', type=int, default=50)
     parser.add_argument('--dist_momentum', type=float, default=0.99)
-    parser.add_argument('--val_interval', type=int, default=2)
+    parser.add_argument('--val_interval', type=int, default=1)
     parser.add_argument('--val_start', type=float, default=0.5)
     return parser
 
@@ -81,15 +82,23 @@ def one_hot_2d(target, num_classes):
     return F.one_hot(target.long(), num_classes=num_classes).permute(0, 3, 1, 2).float()
 
 
+def sanitize_target(target, num_classes, ignore_index=255):
+    target = target.long()
+    valid_mask = (target >= 0) & (target < num_classes)
+    safe_target = target.clone()
+    safe_target[~valid_mask] = 0
+    ignore_target = target.clone()
+    ignore_target[~valid_mask] = ignore_index
+    return safe_target, ignore_target, valid_mask
+
+
 def soft_dice_loss(logits, target, class_weight=None, ignore_index=None, eps=1e-8):
     probs = torch.softmax(logits, dim=1)
+    safe_target, ignore_target, in_range_mask = sanitize_target(target, logits.shape[1], ignore_index=255 if ignore_index is None else ignore_index)
     if ignore_index is None:
-        valid_mask = torch.ones_like(target, dtype=torch.bool)
-        safe_target = target.long()
+        valid_mask = in_range_mask
     else:
-        valid_mask = target != ignore_index
-        safe_target = target.clone().long()
-        safe_target[~valid_mask] = 0
+        valid_mask = (ignore_target != ignore_index) & in_range_mask
     target_onehot = one_hot_2d(safe_target, logits.shape[1])
     valid_mask = valid_mask.unsqueeze(1).float()
     probs = probs * valid_mask
@@ -107,16 +116,18 @@ def soft_dice_loss(logits, target, class_weight=None, ignore_index=None, eps=1e-
 
 
 def compute_seg_loss(name, logits, target, class_weight=None, ignore_index=None):
+    effective_ignore_index = 255 if ignore_index is None else ignore_index
+    _, clean_target, _ = sanitize_target(target, logits.shape[1], ignore_index=effective_ignore_index)
     if name == 'ce':
-        return F.cross_entropy(logits, target.long(), ignore_index=-100 if ignore_index is None else ignore_index)
+        return F.cross_entropy(logits, clean_target, ignore_index=effective_ignore_index)
     if name == 'wce':
-        return F.cross_entropy(logits, target.long(), weight=class_weight, ignore_index=-100 if ignore_index is None else ignore_index)
+        return F.cross_entropy(logits, clean_target, weight=class_weight, ignore_index=effective_ignore_index)
     if name == 'ce+dice':
-        return F.cross_entropy(logits, target.long(), ignore_index=-100 if ignore_index is None else ignore_index) + soft_dice_loss(logits, target, ignore_index=ignore_index)
+        return F.cross_entropy(logits, clean_target, ignore_index=effective_ignore_index) + soft_dice_loss(logits, clean_target, ignore_index=effective_ignore_index)
     if name == 'wce+dice':
-        return F.cross_entropy(logits, target.long(), weight=class_weight, ignore_index=-100 if ignore_index is None else ignore_index) + soft_dice_loss(logits, target, ignore_index=ignore_index)
+        return F.cross_entropy(logits, clean_target, weight=class_weight, ignore_index=effective_ignore_index) + soft_dice_loss(logits, clean_target, ignore_index=effective_ignore_index)
     if name == 'w_ce+dice':
-        return F.cross_entropy(logits, target.long(), weight=class_weight, ignore_index=-100 if ignore_index is None else ignore_index) + soft_dice_loss(logits, target, class_weight=class_weight, ignore_index=ignore_index)
+        return F.cross_entropy(logits, clean_target, weight=class_weight, ignore_index=effective_ignore_index) + soft_dice_loss(logits, clean_target, class_weight=class_weight, ignore_index=effective_ignore_index)
     raise ValueError(name)
 
 
@@ -178,9 +189,13 @@ class DiffDW:
         return self.weights
 
     def _per_class_dice(self, pred, label):
+        safe_label, _, valid_mask = sanitize_target(label, self.num_cls)
         pred_label = torch.argmax(pred, dim=1)
         pred_onehot = one_hot_2d(pred_label, self.num_cls)
-        label_onehot = one_hot_2d(label.long(), self.num_cls)
+        label_onehot = one_hot_2d(safe_label, self.num_cls)
+        valid_mask = valid_mask.unsqueeze(1).float()
+        pred_onehot = pred_onehot * valid_mask
+        label_onehot = label_onehot * valid_mask
         dims = (0, 2, 3)
         intersection = (pred_onehot * label_onehot).sum(dim=dims)
         denominator = pred_onehot.sum(dim=dims) + label_onehot.sum(dim=dims)
@@ -339,7 +354,7 @@ def main(args, cfg, save_path, cp_path):
             optimizer_a.zero_grad()
             optimizer_b.zero_grad()
 
-            with autocast(enabled=amp_enabled):
+            with autocast(device_type='cuda', enabled=amp_enabled):
                 output_a = model_a(image)
                 output_b = model_b(image)
                 output_a_l = output_a[:labeled_bs]

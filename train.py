@@ -215,7 +215,8 @@ def main(args, cfg, save_path, cp_path):
                             f', loss_u: {loss_u.item():.3f}, mask ratio: {mask_ratio:.4f}')
 
         # Validation Loop
-        if iter_num >= total_iters * 0.5 and epoch % 2 == 0:
+        # if iter_num >= total_iters * 0.5 and epoch % 2 == 0:
+        if iter_num >= total_iters * 0:
             model.eval()
             mDice, dice_class = eval_2d(valloader, model, cfg, ifdist=False, val_mode='model')
             model.train()        
