@@ -1,4 +1,5 @@
 import itertools, torch
+import os
 import numpy as np
 from torch.utils.data.sampler import Sampler
 from torch.utils.data import DataLoader, ConcatDataset
@@ -6,6 +7,7 @@ from torch.utils.data.dataloader import default_collate
 from torch.utils.data import Dataset
 import h5py
 from copy import deepcopy
+from PIL import Image
 
 from datasets.transform import *
 
@@ -143,5 +145,158 @@ class Flare_fixmatch_Dataset_effi(Dataset):
             img, mask = normalize_3d_new(img, mask)
             return img, mask
     
+    def __len__(self):
+        return len(self.name_list)
+
+
+class SemiDataset2D(Dataset):
+    def __init__(self, mode, cfg=None, size=None, args=None):
+        self.mode = mode
+        self.cfg = cfg or {}
+        self.args = args
+        self.root_path = self._get_config_value('root_path', '/data/lhy_data/ACDC')
+        self.size = size if size is not None else self._get_config_value('crop_size', None)
+        self.images_h5_dir = self._resolve_images_h5_dir()
+        self.use_explicit_semi_split = False
+        self.name_list = self._build_name_list()
+        print(f"{mode} data number is: {len(self.name_list)}")
+
+    def _get_config_value(self, key, default=None):
+        if isinstance(self.cfg, dict) and key in self.cfg:
+            return self.cfg[key]
+        if self.args is not None and hasattr(self.args, key):
+            return getattr(self.args, key)
+        if isinstance(self.cfg, dict):
+            for alt_key in ['base_dir', 'data_root'] if key == 'root_path' else []:
+                if alt_key in self.cfg:
+                    return self.cfg[alt_key]
+        return default
+
+    def _resolve_images_h5_dir(self):
+        candidates = ['Images_h5', 'images_h5', 'data/slices', 'data']
+        for folder in candidates:
+            folder_path = os.path.join(self.root_path, folder)
+            if os.path.isdir(folder_path):
+                return folder_path
+        return os.path.join(self.root_path, 'Images_h5')
+
+    def _resolve_split_file(self):
+        if self.mode == 'val_test':
+            split_name = 'val.txt'
+        elif self.mode == 'test':
+            split_name = 'test.txt'
+        elif self.mode == 'val':
+            split_name = 'val.txt'
+        elif self.mode in ['train_l', 'train_u']:
+            explicit_path = os.path.join(self.root_path, f'{self.mode}.txt')
+            if os.path.exists(explicit_path):
+                self.use_explicit_semi_split = True
+                return explicit_path
+            split_name = 'train.txt'
+        else:
+            split_name = f'{self.mode}.txt'
+        return os.path.join(self.root_path, split_name)
+
+    def _build_name_list(self):
+        split_path = self._resolve_split_file()
+        with open(split_path, 'r') as f:
+            name_list = [item.strip() for item in f.readlines() if item.strip()]
+
+        if self.mode == 'train_l' and not self.use_explicit_semi_split:
+            labelnum = self._get_config_value('labelnum', None)
+            if labelnum is not None:
+                name_list = name_list[:labelnum]
+        elif self.mode == 'train_u' and not self.use_explicit_semi_split:
+            labelnum = self._get_config_value('labelnum', 0)
+            num = self._get_config_value('num', None)
+            name_list = name_list[labelnum:]
+            if num is not None:
+                name_list = name_list[:num]
+        return name_list
+
+    def _get_sample_path(self, sample_id):
+        sample_name = sample_id if sample_id.endswith('.h5') else f'{sample_id}.h5'
+        return os.path.join(self.images_h5_dir, sample_name)
+
+    def _to_uint8_image(self, image):
+        image = np.asarray(image, dtype=np.float32)
+        image_min = image.min()
+        image_max = image.max()
+        if image_max > image_min:
+            image = (image - image_min) / (image_max - image_min)
+        else:
+            image = np.zeros_like(image, dtype=np.float32)
+        return np.uint8(np.clip(image * 255.0, 0, 255))
+
+    def _to_tensor_image(self, image):
+        image = np.asarray(image, dtype=np.float32)
+        if image.max() > 1.0:
+            image = image / 255.0
+        image = torch.from_numpy(image).float().unsqueeze(0)
+        return image
+
+    def _to_tensor_mask(self, mask):
+        return torch.from_numpy(np.asarray(mask, dtype=np.uint8)).long()
+
+    def _normalize_size(self):
+        if self.size is None:
+            return None
+        if isinstance(self.size, int):
+            return self.size
+        if isinstance(self.size, (list, tuple)):
+            if len(self.size) == 0:
+                return None
+            if len(self.size) == 1:
+                return int(self.size[0])
+            if int(self.size[0]) != int(self.size[1]):
+                raise ValueError(f"SemiDataset2D expects square crop size, but got {self.size}")
+            return int(self.size[0])
+        return int(self.size)
+
+    def _apply_train_aug(self, image, mask, ignore_value):
+        crop_size = self._normalize_size()
+        if crop_size is not None:
+            image, mask = crop(image, mask, crop_size, ignore_value=ignore_value)
+        image, mask = hflip(image, mask)
+        return image, mask
+
+    def __getitem__(self, idx):
+        sample_id = self.name_list[idx]
+        sample_path = self._get_sample_path(sample_id)
+        with h5py.File(sample_path, 'r') as h5f:
+            image = h5f['image'][:]
+            has_label = 'label' in h5f
+            if self.mode == 'train_u':
+                mask = np.zeros_like(image, dtype=np.uint8)
+            elif has_label:
+                mask = h5f['label'][:]
+            else:
+                raise KeyError(f'label not found in {sample_path}')
+
+        image_pil = Image.fromarray(self._to_uint8_image(image))
+        mask_pil = Image.fromarray(np.asarray(mask, dtype=np.uint8))
+
+        if self.mode == 'train_l':
+            image_pil, mask_pil = self._apply_train_aug(image_pil, mask_pil, ignore_value=255)
+            return self._to_tensor_image(image_pil), self._to_tensor_mask(mask_pil)
+
+        if self.mode == 'train_u':
+            image_w, mask_w = self._apply_train_aug(image_pil, mask_pil, ignore_value=254)
+            image_s = blur(deepcopy(image_w), p=0.5)
+            ignore_mask = np.zeros(np.asarray(mask_w).shape, dtype=np.uint8)
+            ignore_mask[np.asarray(mask_w) == 254] = 255
+            cutmix_box = obtain_cutmix_box(min(image_s.size))
+            return (
+                self._to_tensor_image(image_w),
+                self._to_tensor_image(image_s),
+                self._to_tensor_mask(ignore_mask),
+                cutmix_box
+            )
+
+        if self.mode in ['val', 'val_test', 'test']:
+            return self._to_tensor_image(image), self._to_tensor_mask(mask)
+
+        raise ValueError(f'Unsupported mode: {self.mode}')
+
     def __len__(self):
         return len(self.name_list)
