@@ -62,4 +62,25 @@ DATASET_CONFIGS = {
         'label_help': '20 for 1:15; 40 for 1:7.5; 60 for 1:5',
         'num': 300,
     },
+    '20acdc': {
+        'config': 'configs/ACDC/20acdc.yaml',
+        'base_dir': '/data/lhy_data/ACDC',
+        'labelnum': 14,  
+        'num': 56,
+        'label_help': '14 for 1:5; 7 for 1:10; 3 for 1:20',
+    },
+    '10acdc': {
+        'config': 'configs/ACDC/10acdc.yaml',
+        'base_dir': '/data/lhy_data/ACDC',
+        'labelnum': 7, 
+        'num': 63,
+        'label_help': '14 for 1:5; 7 for 1:10; 3 for 1:20',
+    },
+    '5acdc': {
+        'config': 'configs/ACDC/5acdc.yaml',
+        'base_dir': '/data/lhy_data/ACDC',
+        'labelnum': 3,  
+        'num': 67,
+        'label_help': '14 for 1:5; 7 for 1:10; 3 for 1:20',
+    },
 }

@@ -13,12 +13,12 @@ from torch.utils.tensorboard import SummaryWriter
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
-from Datasets.efficient import SemiDataset2D, TwoStreamBatchSampler, mix_collate_fn
+from Datasets.efficient import ACDCsemiDataset, TwoStreamBatchSampler, mix_collate_fn
 from models.unet2d import UNet, kaiming_normal_init_weight
 from utils.classes import CLASSES
 from utils.datasets import DATASET_CONFIGS
 from utils.util import count_params, init_log, AverageMeter, DiceLoss
-from utils.val import evaluate_3d
+from utils.val import eval_2d
 
 def get_parser(datasetname):
     cfgs = DATASET_CONFIGS[datasetname]
@@ -80,10 +80,10 @@ def main(args, cfg, save_path, cp_path):
     logger.info('Total params: {:.3f}M'.format(count_params(model)))
 
     # 1. 创建 Dataset 实例
-    trainset_u = SemiDataset2D('train_u', args, cfg['crop_size'])
-    trainset_l = SemiDataset2D('train_l', args, cfg['crop_size']) 
+    trainset_u = ACDCsemiDataset('train_u', args, cfg['crop_size'])
+    trainset_l = ACDCsemiDataset('train_l', args, cfg['crop_size']) 
 
-    valset = SemiDataset2D('val', args, cfg['crop_size'])
+    valset = ACDCsemiDataset('val', args, cfg['crop_size'])
     valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=1, drop_last=False)
 
     # 2. 定义 Batch Size 分配
@@ -209,17 +209,17 @@ def main(args, cfg, save_path, cp_path):
             # }, step=iters)
             # # ==============================
 
-            if (i % (args.num // 9) == 0):
+            if (i % (args.num // 2) == 0):
                 logger.info(f'Iters: {iter_num}/{total_iters}, LR: {lr:.7f}, Total loss: {total_loss.avg:.3f}'
                             f', loss_l: {loss_l.item():.3f}, loss_dice: {loss_dice.item():.3f}, loss_ce: {loss_ce.item():.3f}'
                             f', loss_u: {loss_u.item():.3f}, mask ratio: {mask_ratio:.4f}')
 
         # Validation Loop
-        if iter_num >= total_iters * 0.7 and epoch % 2 == 0:
+        if iter_num >= total_iters * 0.5 and epoch % 2 == 0:
             model.eval()
-            mDice, dice_class = evaluate_3d(valloader, model, cfg, ifdist=False, val_mode='model')
+            mDice, dice_class = eval_2d(valloader, model, cfg, ifdist=False, val_mode='model')
             model.train()        
-            mDice_ema, dice_class_ema = evaluate_3d(valloader, model_ema, cfg, ifdist=False, val_mode='ema')           
+            mDice_ema, dice_class_ema = eval_2d(valloader, model_ema, cfg, ifdist=False, val_mode='ema')           
             
             # # === [WandB & TensorBoard Log: Validation] ===
             # wandb_val_log = {}

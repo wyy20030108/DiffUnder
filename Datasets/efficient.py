@@ -1,5 +1,5 @@
 import itertools, torch
-import os, sys
+import os, sys, re
 import numpy as np
 from torch.utils.data.sampler import Sampler
 from torch.utils.data import DataLoader, ConcatDataset
@@ -336,3 +336,188 @@ class SemiDataset2D(Dataset):
 
     def __len__(self):
         return len(self.name_list)
+
+class ACDCsemiDataset(Dataset):
+    def __init__(self, mode, args, size=None):
+        self.mode = mode
+        self.args = args
+        self.size = size
+        self.root_path = getattr(args, 'base_dir', '/data/lhy_data/ACDC')
+        self.labelnum = getattr(args, 'labelnum', None)
+        self.images_h5_dir = self._resolve_images_h5_dir()
+        self.all_slice_names = self._list_all_slice_names()
+        self.patient_to_slices = self._build_patient_to_slices(self.all_slice_names)
+        self.name_list = self._build_name_list()
+        print(f"{mode} data number is: {len(self.name_list)}")
+
+    def _resolve_images_h5_dir(self):
+        for folder in ['Images_h5', 'images_h5']:
+            folder_path = os.path.join(self.root_path, folder)
+            if os.path.isdir(folder_path):
+                return folder_path
+        raise FileNotFoundError(f'Images_h5 not found under {self.root_path}')
+
+    def _list_all_slice_names(self):
+        return sorted([
+            file_name[:-3]
+            for file_name in os.listdir(self.images_h5_dir)
+            if file_name.endswith('.h5')
+        ])
+
+    def _extract_patient_id(self, sample_name):
+        match = re.search(r'(patient\d+)', sample_name)
+        if match is None:
+            raise ValueError(f'Cannot parse patient id from {sample_name}')
+        return match.group(1)
+
+    def _build_patient_to_slices(self, slice_names):
+        patient_to_slices = {}
+        for sample_name in slice_names:
+            patient_id = self._extract_patient_id(sample_name)
+            patient_to_slices.setdefault(patient_id, []).append(sample_name)
+        for patient_id in patient_to_slices:
+            patient_to_slices[patient_id] = sorted(patient_to_slices[patient_id])
+        return patient_to_slices
+
+    def _resolve_split_path(self):
+        if self.mode in ['train_l', 'train_u']:
+            candidates = ['train.txt', 'train_slice.txt']
+        elif self.mode == 'val':
+            candidates = ['val.txt', 'val_slice.txt']
+        elif self.mode in ['test', 'val_test']:
+            candidates = ['test.txt', 'val.txt', 'test_slice.txt', 'val_slice.txt']
+        else:
+            candidates = [f'{self.mode}.txt']
+        for candidate in candidates:
+            split_path = os.path.join(self.root_path, candidate)
+            if os.path.exists(split_path):
+                return split_path
+        return None
+
+    def _read_split_items(self, split_path):
+        if split_path is None:
+            return []
+        with open(split_path, 'r') as f:
+            return [line.strip() for line in f.readlines() if line.strip()]
+
+    def _expand_items_to_slice_names(self, items):
+        expanded = []
+        for item in items:
+            sample_name = item[:-3] if item.endswith('.h5') else item
+            if sample_name in self.all_slice_names:
+                expanded.append(sample_name)
+                continue
+            patient_id = self._extract_patient_id(sample_name)
+            if patient_id in self.patient_to_slices:
+                expanded.extend(self.patient_to_slices[patient_id])
+        return sorted(set(expanded))
+
+    def _build_train_slice_names(self):
+        split_items = self._read_split_items(self._resolve_split_path())
+        if split_items:
+            expanded = self._expand_items_to_slice_names(split_items)
+            if expanded:
+                return expanded
+        return self.all_slice_names
+
+    def _split_train_patients(self, train_slice_names):
+        patient_ids = sorted({self._extract_patient_id(name) for name in train_slice_names})
+        rng = random.Random(1337)
+        rng.shuffle(patient_ids)
+        if self.labelnum is None:
+            labelnum = len(patient_ids)
+        else:
+            labelnum = max(0, min(int(self.labelnum), len(patient_ids)))
+        labeled_patients = set(patient_ids[:labelnum])
+        unlabeled_patients = set(patient_ids[labelnum:])
+        return labeled_patients, unlabeled_patients
+
+    def _build_name_list(self):
+        if self.mode in ['train_l', 'train_u']:
+            train_slice_names = self._build_train_slice_names()
+            labeled_patients, unlabeled_patients = self._split_train_patients(train_slice_names)
+            if self.mode == 'train_l':
+                return [name for name in train_slice_names if self._extract_patient_id(name) in labeled_patients]
+            return [name for name in train_slice_names if self._extract_patient_id(name) in unlabeled_patients]
+        split_items = self._read_split_items(self._resolve_split_path())
+        if split_items:
+            expanded = self._expand_items_to_slice_names(split_items)
+            if expanded:
+                return expanded
+        return self.all_slice_names
+
+    def _get_sample_path(self, sample_name):
+        return os.path.join(self.images_h5_dir, f'{sample_name}.h5')
+
+    def _to_uint8_image(self, image):
+        image = np.asarray(image, dtype=np.float32)
+        image_min = image.min()
+        image_max = image.max()
+        if image_max > image_min:
+            image = (image - image_min) / (image_max - image_min)
+        else:
+            image = np.zeros_like(image, dtype=np.float32)
+        return np.uint8(np.clip(image * 255.0, 0, 255))
+
+    def _to_tensor_image(self, image):
+        image = np.asarray(image, dtype=np.float32)
+        if image.max() > 1.0:
+            image = image / 255.0
+        return torch.from_numpy(image).float().unsqueeze(0)
+
+    def _to_tensor_mask(self, mask):
+        return torch.from_numpy(np.asarray(mask, dtype=np.uint8).copy()).long()
+
+    def _normalize_size(self):
+        if self.size is None:
+            return None
+        if isinstance(self.size, int):
+            return self.size
+        if isinstance(self.size, (list, tuple)):
+            if len(self.size) == 0:
+                return None
+            return int(self.size[0])
+        return int(self.size)
+
+    def _apply_train_aug(self, image, mask, ignore_value):
+        crop_size = self._normalize_size()
+        if crop_size is not None:
+            image, mask = crop(image, mask, crop_size, ignore_value=ignore_value)
+        image, mask = hflip(image, mask)
+        return image, mask
+
+    def __getitem__(self, idx):
+        sample_name = self.name_list[idx]
+        sample_path = self._get_sample_path(sample_name)
+        with h5py.File(sample_path, 'r') as h5f:
+            image = h5f['image'][:]
+            label = h5f['label'][:] if ('label' in h5f and self.mode != 'train_u') else np.zeros_like(image, dtype=np.uint8)
+
+        image_pil = Image.fromarray(self._to_uint8_image(image))
+        mask_pil = Image.fromarray(np.asarray(label, dtype=np.uint8))
+
+        if self.mode == 'train_l':
+            image_pil, mask_pil = self._apply_train_aug(image_pil, mask_pil, ignore_value=255)
+            return self._to_tensor_image(image_pil), self._to_tensor_mask(mask_pil)
+
+        if self.mode == 'train_u':
+            image_w, mask_w = self._apply_train_aug(image_pil, mask_pil, ignore_value=254)
+            image_s = blur(deepcopy(image_w), p=0.5)
+            ignore_mask = np.zeros(np.asarray(mask_w).shape, dtype=np.uint8)
+            ignore_mask[np.asarray(mask_w) == 254] = 255
+            cutmix_box = obtain_cutmix_box(min(image_s.size))
+            return (
+                self._to_tensor_image(image_w),
+                self._to_tensor_image(image_s),
+                self._to_tensor_mask(ignore_mask),
+                cutmix_box
+            )
+
+        if self.mode in ['val', 'test', 'val_test']:
+            return self._to_tensor_image(image), self._to_tensor_mask(label)
+
+        raise ValueError(f'Unsupported mode: {self.mode}')
+
+    def __len__(self):
+        return len(self.name_list)
+    

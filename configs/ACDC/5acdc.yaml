@@ -3,7 +3,8 @@
 # ==========================================
 dataset: ACDC
 nclass: 4                # 🚨 修正: ACDC 标准为 4 类 (0:背景, 1:右心室RV, 2:心肌Myo, 3:左心室LV)
-labeled_cases: 3
+labelnum: 3
+num: 67
 crop_size: [256, 256]
 val_patch_size: [256, 256] 
 
@@ -31,6 +32,7 @@ unsup_loss_weight: 0.1
 # ==========================================
 # Arguments for Optimizer & Scheduler
 # ==========================================
+lr: 0.01
 optimizer:
   name: SGD             
   kwargs:

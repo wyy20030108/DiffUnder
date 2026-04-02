@@ -69,4 +69,9 @@ CLASSES = {'pascal': ['background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bot
                          'IVC', 'Pancreas',  'RAG', 'LAG', 'Duodenum', 'Bladder', 'Prostate/Uterus'],
 
             'AK': ['Liver', 'Kidney', 'Spleen', 'Pancreas'],
-           }
+
+            'ACDC': ['RV', 'Myo', 'LV'],
+            'ACDC_All': ['background', 'RV', 'Myo', 'LV'],
+
+
+            }
