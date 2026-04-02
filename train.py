@@ -4,7 +4,7 @@ os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True,max_s
 import yaml, time, shutil, random, logging, pprint, torch, sys, argparse, gc, csv
 import numpy as np
 from copy import deepcopy
-from torch.optim import AdamW
+from torch.optim import AdamW, SGD
 import torch.backends.cudnn as cudnn
 from torch import nn
 import torch.nn.functional as F
@@ -69,7 +69,9 @@ def main(args, cfg, save_path, cp_path):
         
     optimizer = AdamW( 
         params=model.parameters(),
-        lr=cfg['lr'], betas=(0.9, 0.999), weight_decay=0.01)    
+        lr=cfg['lr'], betas=(0.9, 0.999), weight_decay=0.01)   
+    # optimizer = SGD(model.parameters(), lr=cfg['lr'],
+    #                       momentum=0.9, weight_decay=0.0001)  # 0.0001
     
     criterion_l = nn.CrossEntropyLoss(ignore_index=255).cuda()
     diceloss = DiceLoss(cfg['nclass']).cuda()
@@ -215,8 +217,8 @@ def main(args, cfg, save_path, cp_path):
                             f', loss_u: {loss_u.item():.3f}, mask ratio: {mask_ratio:.4f}')
 
         # Validation Loop
-        # if iter_num >= total_iters * 0.5 and epoch % 2 == 0:
-        if iter_num >= total_iters * 0:
+        if iter_num >= total_iters * 0.5:
+        # if iter_num >= total_iters * 0:
             model.eval()
             mDice, dice_class = eval_2d(valloader, model, cfg, ifdist=False, val_mode='model')
             model.train()        
