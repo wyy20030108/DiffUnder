@@ -1,5 +1,5 @@
 import itertools, torch
-import os, sys, re
+import os, sys, re, random
 import numpy as np
 from torch.utils.data.sampler import Sampler
 from torch.utils.data import DataLoader, ConcatDataset
@@ -517,6 +517,295 @@ class ACDCsemiDataset(Dataset):
             return self._to_tensor_image(image), self._to_tensor_mask(label)
 
         raise ValueError(f'Unsupported mode: {self.mode}')
+
+    def __len__(self):
+        return len(self.name_list)
+
+
+class BUSISemiDataset(Dataset):
+    IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+    MASK_DIR_NAMES = {'mask', 'masks', 'label', 'labels', 'gt', 'gts', 'annotation', 'annotations'}
+    MASK_SUFFIXES = ('_mask', '-mask', '_seg', '-seg', '_label', '-label', '_gt', '-gt')
+
+    def __init__(self, mode, args, size=None):
+        self.mode = mode
+        self.args = args
+        self.size = size
+        self.root_path = getattr(args, 'base_dir', '/data/lhy_data/BUSI')
+        self.labelnum = getattr(args, 'labelnum', None)
+        self.num = getattr(args, 'num', None)
+        self.ratio_range = self._normalize_ratio_range(
+            getattr(args, 'ratio_range', getattr(args, 'scale_range', (0.8, 1.2)))
+        )
+        self.all_records = self._scan_records()
+        self.record_by_relpath = {record['rel_path']: record for record in self.all_records}
+        self.record_by_stem = {record['stem']: record for record in self.all_records}
+        self.name_list = self._build_name_list()
+        print(f"{mode} data number is: {len(self.name_list)}")
+
+    def _normalize_ratio_range(self, ratio_range):
+        if ratio_range is None:
+            return None
+        if isinstance(ratio_range, (int, float)):
+            ratio = float(ratio_range)
+            return (ratio, ratio)
+        if isinstance(ratio_range, (list, tuple)) and len(ratio_range) == 2:
+            return (float(ratio_range[0]), float(ratio_range[1]))
+        raise ValueError(f'Invalid ratio_range: {ratio_range}')
+
+    def _normalize_size(self):
+        if self.size is None:
+            return None
+        if isinstance(self.size, int):
+            return self.size
+        if isinstance(self.size, (list, tuple)):
+            if len(self.size) == 0:
+                return None
+            if len(self.size) == 1:
+                return int(self.size[0])
+            if int(self.size[0]) != int(self.size[1]):
+                raise ValueError(f'BUSISemiDataset expects square crop size, but got {self.size}')
+            return int(self.size[0])
+        return int(self.size)
+
+    def _canonical_relpath(self, path):
+        return os.path.normpath(path).replace('\\', '/')
+
+    def _is_image_file(self, file_name):
+        return os.path.splitext(file_name)[1].lower() in self.IMAGE_EXTENSIONS
+
+    def _is_mask_file(self, abs_path):
+        parent_name = os.path.basename(os.path.dirname(abs_path)).lower()
+        if parent_name in self.MASK_DIR_NAMES:
+            return True
+        stem = os.path.splitext(os.path.basename(abs_path))[0].lower()
+        return any(stem.endswith(suffix) for suffix in self.MASK_SUFFIXES)
+
+    def _resolve_mask_path(self, image_path):
+        image_dir = os.path.dirname(image_path)
+        image_stem = os.path.splitext(os.path.basename(image_path))[0]
+        ext_candidates = list(dict.fromkeys([
+            os.path.splitext(image_path)[1].lower(),
+            *self.IMAGE_EXTENSIONS,
+        ]))
+
+        candidate_paths = []
+        for suffix in self.MASK_SUFFIXES:
+            for ext in ext_candidates:
+                candidate_paths.append(os.path.join(image_dir, f'{image_stem}{suffix}{ext}'))
+
+        parent_dir = os.path.dirname(image_dir)
+        for folder_name in self.MASK_DIR_NAMES:
+            mask_dir = os.path.join(image_dir, folder_name)
+            parent_mask_dir = os.path.join(parent_dir, folder_name)
+            for ext in ext_candidates:
+                candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{ext}'))
+                candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{ext}'))
+                for suffix in self.MASK_SUFFIXES:
+                    candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{suffix}{ext}'))
+                    candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{suffix}{ext}'))
+
+        for candidate_path in candidate_paths:
+            if os.path.isfile(candidate_path):
+                return candidate_path
+        return None
+
+    def _make_record(self, image_path, mask_path=None):
+        image_path = os.path.abspath(image_path)
+        return {
+            'image_path': image_path,
+            'mask_path': os.path.abspath(mask_path) if mask_path is not None else None,
+            'rel_path': self._canonical_relpath(os.path.relpath(image_path, self.root_path)),
+            'stem': os.path.splitext(os.path.basename(image_path))[0],
+        }
+
+    def _scan_records(self):
+        records = []
+        for current_root, _, file_names in os.walk(self.root_path):
+            for file_name in sorted(file_names):
+                if not self._is_image_file(file_name):
+                    continue
+                image_path = os.path.join(current_root, file_name)
+                if self._is_mask_file(image_path):
+                    continue
+                records.append(self._make_record(image_path, self._resolve_mask_path(image_path)))
+        if not records:
+            raise FileNotFoundError(f'No BUSI images found under {self.root_path}')
+        records.sort(key=lambda item: item['rel_path'])
+        return records
+
+    def _resolve_split_path(self):
+        if self.mode == 'train_l':
+            candidates = ['train_l.txt', 'labeled.txt', 'train.txt']
+        elif self.mode == 'train_u':
+            candidates = ['train_u.txt', 'unlabeled.txt', 'train.txt']
+        elif self.mode == 'val':
+            candidates = ['val.txt']
+        elif self.mode in ['test', 'val_test']:
+            candidates = ['test.txt', 'val.txt']
+        else:
+            candidates = [f'{self.mode}.txt']
+        for candidate in candidates:
+            split_path = os.path.join(self.root_path, candidate)
+            if os.path.isfile(split_path):
+                return split_path
+        return None
+
+    def _parse_split_line(self, line):
+        line = line.strip()
+        if not line:
+            return None, None
+        if '\t' in line:
+            parts = [part.strip() for part in line.split('\t') if part.strip()]
+        elif ',' in line:
+            parts = [part.strip() for part in line.split(',', 1) if part.strip()]
+        else:
+            parts = [line]
+        if len(parts) == 1:
+            return parts[0], None
+        return parts[0], parts[1]
+
+    def _resolve_to_abs_path(self, path):
+        if path is None:
+            return None
+        path = path.strip().strip('"').strip("'")
+        if not path:
+            return None
+        if os.path.isabs(path):
+            candidate = path
+        else:
+            candidate = os.path.join(self.root_path, path)
+        candidate = os.path.abspath(os.path.normpath(candidate))
+        return candidate if os.path.exists(candidate) else None
+
+    def _lookup_record(self, image_key):
+        image_key = image_key.strip().strip('"').strip("'")
+        rel_key = self._canonical_relpath(image_key)
+        if rel_key in self.record_by_relpath:
+            return dict(self.record_by_relpath[rel_key])
+
+        abs_path = self._resolve_to_abs_path(image_key)
+        if abs_path is not None:
+            abs_rel_key = self._canonical_relpath(os.path.relpath(abs_path, self.root_path))
+            if abs_rel_key in self.record_by_relpath:
+                return dict(self.record_by_relpath[abs_rel_key])
+
+        stem = os.path.splitext(os.path.basename(image_key))[0]
+        if stem in self.record_by_stem:
+            return dict(self.record_by_stem[stem])
+        return None
+
+    def _load_records_from_split(self, split_path):
+        if split_path is None:
+            return []
+        records = []
+        with open(split_path, 'r') as f:
+            for raw_line in f:
+                image_key, mask_key = self._parse_split_line(raw_line)
+                if image_key is None:
+                    continue
+                record = self._lookup_record(image_key)
+                if record is None:
+                    image_path = self._resolve_to_abs_path(image_key)
+                    if image_path is None:
+                        raise FileNotFoundError(f'Cannot resolve BUSI image path from split item: {image_key}')
+                    record = self._make_record(image_path, self._resolve_mask_path(image_path))
+                if mask_key is not None:
+                    mask_path = self._resolve_to_abs_path(mask_key)
+                    if mask_path is None:
+                        raise FileNotFoundError(f'Cannot resolve BUSI mask path from split item: {mask_key}')
+                    record['mask_path'] = mask_path
+                records.append(record)
+        return records
+
+    def _split_train_records(self, train_records):
+        shuffled = list(train_records)
+        rng = random.Random(1337)
+        rng.shuffle(shuffled)
+        if self.labelnum is None:
+            labelnum = len(shuffled)
+        else:
+            labelnum = max(0, min(int(self.labelnum), len(shuffled)))
+        labeled_records = shuffled[:labelnum]
+        unlabeled_records = shuffled[labelnum:]
+        if self.num is not None:
+            unlabeled_records = unlabeled_records[:max(0, int(self.num))]
+        return labeled_records, unlabeled_records
+
+    def _build_name_list(self):
+        split_path = self._resolve_split_path()
+        split_records = self._load_records_from_split(split_path)
+
+        if self.mode == 'train_l':
+            explicit_split = split_path is not None and os.path.basename(split_path) in {'train_l.txt', 'labeled.txt'}
+            if explicit_split:
+                return split_records
+            labeled_records, _ = self._split_train_records(split_records if split_records else self.all_records)
+            return labeled_records
+
+        if self.mode == 'train_u':
+            explicit_split = split_path is not None and os.path.basename(split_path) in {'train_u.txt', 'unlabeled.txt'}
+            if explicit_split:
+                records = split_records
+                if self.num is not None:
+                    records = records[:max(0, int(self.num))]
+                return records
+            _, unlabeled_records = self._split_train_records(split_records if split_records else self.all_records)
+            return unlabeled_records
+
+        if split_records:
+            return split_records
+        return self.all_records
+
+    def _load_image(self, image_path):
+        return Image.open(image_path).convert('RGB')
+
+    def _load_mask(self, mask_path):
+        if mask_path is None:
+            raise FileNotFoundError('BUSI labeled sample requires a valid mask path')
+        mask = np.asarray(Image.open(mask_path).convert('L'), dtype=np.uint8)
+        if mask.max() > 1:
+            mask = (mask > 0).astype(np.uint8)
+        return Image.fromarray(mask)
+
+    def _apply_train_aug(self, image, mask, ignore_value):
+        if self.ratio_range is not None:
+            image, mask = resize(image, mask, self.ratio_range)
+        crop_size = self._normalize_size()
+        if crop_size is not None:
+            image, mask = crop(image, mask, crop_size, ignore_value=ignore_value)
+        image, mask = hflip(image, mask)
+        return image, mask
+
+    def _build_empty_mask(self, image):
+        width, height = image.size
+        return Image.fromarray(np.zeros((height, width), dtype=np.uint8))
+
+    def __getitem__(self, idx):
+        sample = self.name_list[idx]
+        image = self._load_image(sample['image_path'])
+        mask = self._build_empty_mask(image) if self.mode == 'train_u' else self._load_mask(sample['mask_path'])
+
+        if self.mode == 'train_l':
+            image, mask = self._apply_train_aug(image, mask, ignore_value=255)
+            return normalize(image, mask)
+
+        if self.mode == 'train_u':
+            image_w, mask_w = self._apply_train_aug(image, mask, ignore_value=254)
+            image_s = blur(deepcopy(image_w), p=0.5)
+            ignore_mask = np.zeros(np.asarray(mask_w).shape, dtype=np.uint8)
+            ignore_mask[np.asarray(mask_w) == 254] = 255
+            cutmix_box = obtain_cutmix_box(min(image_s.size))
+            return (
+                normalize(image_w),
+                normalize(image_s),
+                torch.from_numpy(ignore_mask.copy()).long(),
+                cutmix_box
+            )
+
+        if sample['mask_path'] is None:
+            raise FileNotFoundError(f"Mask not found for BUSI sample: {sample['image_path']}")
+        return normalize(image, self._load_mask(sample['mask_path']))
 
     def __len__(self):
         return len(self.name_list)

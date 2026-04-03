@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions.uniform import Uniform
+from einops import rearrange
 
 def kaiming_normal_init_weight(model):
     for m in model.modules():
@@ -149,8 +150,49 @@ class Decoder(nn.Module):
         x = self.up2(x, x2)
         x = self.up3(x, x1)
         x = self.up4(x, x0)
-        output = self.out_conv(x)
-        return output
+        return x
+
+
+class Corr(nn.Module):
+    def __init__(self, in_channels, nclass=21):
+        super(Corr, self).__init__()
+        self.nclass = nclass
+        self.conv1 = nn.Conv2d(in_channels, self.nclass, kernel_size=1, stride=1, padding=0, bias=True)
+        self.conv2 = nn.Conv2d(in_channels, self.nclass, kernel_size=1, stride=1, padding=0, bias=True)
+
+    def forward(self, feature_in, out):
+        dict_return = {}
+        h_in, w_in = feature_in.shape[2], feature_in.shape[3]
+        h_out, w_out = out.shape[2], out.shape[3]
+        out = torch.nn.functional.interpolate(out.detach(), (h_in, w_in), mode='bilinear', align_corners=True)
+        feature = torch.nn.functional.interpolate(feature_in, (h_in, w_in), mode='bilinear', align_corners=True)
+        f1 = rearrange(self.conv1(feature), 'n c h w -> n c (h w)')
+        f2 = rearrange(self.conv2(feature), 'n c h w -> n c (h w)')
+        out_temp = rearrange(out, 'n c h w -> n c (h w)')
+        corr_map = torch.matmul(f1.transpose(1, 2), f2) / torch.sqrt(torch.tensor(f1.shape[1], device=f1.device).float())
+        corr_map = torch.nn.functional.softmax(corr_map, dim=-1)
+        corr_map_sample = self.sample(corr_map.detach(), h_in, w_in)
+        dict_return['corr_map'] = self.normalize_corr_map(corr_map_sample, h_in, w_in, h_out, w_out)
+        dict_return['out'] = rearrange(torch.matmul(out_temp, corr_map), 'n c (h w) -> n c h w', h=h_in, w=w_in)
+        return dict_return
+
+    def sample(self, corr_map, h_in, w_in):
+        sample_count = min(128, h_in * w_in)
+        index = torch.randint(0, h_in * w_in, [sample_count], device=corr_map.device)
+        corr_map_sample = corr_map[:, index.long(), :]
+        return corr_map_sample
+
+    def normalize_corr_map(self, corr_map, h_in, w_in, h_out, w_out):
+        n, m, _ = corr_map.shape
+        corr_map = rearrange(corr_map, 'n m (h w) -> (n m) 1 h w', h=h_in, w=w_in)
+        corr_map = torch.nn.functional.interpolate(corr_map, (h_out, w_out), mode='bilinear', align_corners=True)
+        corr_map = rearrange(corr_map, '(n m) 1 h w -> (n m) (h w)', n=n, m=m)
+        range_ = torch.max(corr_map, dim=1, keepdim=True)[0] - torch.min(corr_map, dim=1, keepdim=True)[0]
+        range_ = range_.clamp_min(1e-8)
+        temp_map = ((- torch.min(corr_map, dim=1, keepdim=True)[0]) + corr_map) / range_
+        corr_map = (temp_map > 0.5)
+        norm_corr_map = rearrange(corr_map, '(n m) (h w) -> n m h w', n=n, m=m, h=h_out, w=w_out)
+        return norm_corr_map
 
 def Dropout(x, p=0.3):
     x = torch.nn.functional.dropout(x, p)
@@ -169,8 +211,50 @@ class UNet(nn.Module):
 
         self.encoder = Encoder(params)
         self.decoder = Decoder(params)
+        self.classifier = self.decoder.out_conv
+        self.is_corr = True
+        self.proj = nn.Sequential(
+            nn.Conv2d(params['feature_chns'][-1], params['feature_chns'][0], kernel_size=3, stride=1, padding=1, bias=True),
+            nn.BatchNorm2d(params['feature_chns'][0]),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.1),
+        )
+        self.corr = Corr(in_channels=params['feature_chns'][0], nclass=class_num)
 
-    def forward(self, x):
+    def forward(self, x, need_fp=False, use_corr=False):
         feature = self.encoder(x)
-        output = self.decoder(feature)
-        return output
+        dict_return = {}
+
+        if need_fp:
+            decoder_feature = self.decoder([torch.cat((feat, nn.Dropout2d(0.5)(feat))) for feat in feature])
+            outs = self.classifier(decoder_feature)
+            out, out_fp = outs.chunk(2)
+            if use_corr:
+                proj_feats = self.proj(feature[-1])
+                corr_out_dict = self.corr(proj_feats, out)
+                dict_return['corr_map'] = corr_out_dict['corr_map']
+                dict_return['corr_out'] = torch.nn.functional.interpolate(
+                    corr_out_dict['out'],
+                    size=out.shape[-2:],
+                    mode='bilinear',
+                    align_corners=True,
+                )
+            dict_return['out'] = out
+            dict_return['out_fp'] = out_fp
+            return dict_return
+
+        decoder_feature = self.decoder(feature)
+        out = self.classifier(decoder_feature)
+        if use_corr:
+            proj_feats = self.proj(feature[-1])
+            corr_out_dict = self.corr(proj_feats, out)
+            dict_return['corr_map'] = corr_out_dict['corr_map']
+            dict_return['corr_out'] = torch.nn.functional.interpolate(
+                corr_out_dict['out'],
+                size=out.shape[-2:],
+                mode='bilinear',
+                align_corners=True,
+            )
+            dict_return['out'] = out
+            return dict_return
+        return out

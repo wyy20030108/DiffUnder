@@ -612,7 +612,7 @@ if __name__ == '__main__':
     save_path = os.path.join(cp_path, 'log')
     os.makedirs(save_path, exist_ok=True)
 
-    include_list = ['methods', 'utils', 'configs', 'datasets_ours']
+    include_list = ['comparison', 'utils', 'configs', 'Datasets', 'models', 'scripts', 'tools']
     target_dir = cp_path + '/code'
     if os.path.exists(target_dir):
         shutil.rmtree(target_dir)
