@@ -8,6 +8,8 @@
 |  SoftMatch |                |                 |                 |                  |                  |
 |  RankMatch |                |                 |                 |                  |                  |
 |  AgScore   |                |                 |                 |                  |                  |
+|    CGS     |                |                 |                 |                  |                  |
+|            |                |                 |                 |                  |                  |
 |            |                |                 |                 |                  |                  |
 
 ## 5% Labeled / 95% Unlabeled (1:19 Ratio)
@@ -21,6 +23,8 @@
 |  SoftMatch |                |                 |                 |                  |                  |
 |  RankMatch |                |                 |                 |                  |                  |
 |  AgScore   |                |                 |                 |                  |                  |
+|    CGS     |                |                 |                 |                  |                  |
+|            |                |                 |                 |                  |                  |
 |            |                |                 |                 |                  |                  |
 
 ## 10% Labeled / 90% Unlabeled (1:9 Ratio)
@@ -34,6 +38,8 @@
 |  SoftMatch |                |                 |                 |                  |                  |
 |  RankMatch |                |                 |                 |                  |                  |
 |  AgScore   |                |                 |                 |                  |                  |
+|    CGS     |                |                 |                 |                  |                  |
+|            |                |                 |                 |                  |                  |
 |            |                |                 |                 |                  |                  |
 
 ## 20% Labeled / 80% Unlabeled (1:4 Ratio)
@@ -47,4 +53,6 @@
 |  SoftMatch |                |                 |                 |                  |                  |
 |  RankMatch |                |                 |                 |                  |                  |
 |  AgScore   |                |                 |                 |                  |                  |
+|    CGS     |                |                 |                 |                  |                  |
+|            |                |                 |                 |                  |                  |
 |            |                |                 |                 |                  |                  |
