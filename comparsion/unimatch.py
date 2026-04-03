@@ -50,8 +50,6 @@ def get_parser(datasetname):
     parser.add_argument('--conf_thresh', type=float, default=0.95)
     parser.add_argument('--cutmix_p', type=float, default=0.5)
     parser.add_argument('--strong_p', type=float, default=0.8)
-    parser.add_argument('--fp_noise_std', type=float, default=0.1)
-    parser.add_argument('--fp_noise_clip', type=float, default=0.2)
     parser.add_argument('--val_interval', type=int, default=1)
     parser.add_argument('--val_start', type=float, default=0.5)
     parser.add_argument('--resize_ratio_min', type=float, default=0.5)
@@ -322,19 +320,27 @@ class UniMatchACDCDataset(Dataset):
 
 
 class FeaturePerturbationUNet(nn.Module):
-    def __init__(self, in_chns, class_num, fp_noise_std=0.1, fp_noise_clip=0.2):
+    def __init__(self, in_chns, class_num, fp_dropout_p=0.5):
         super().__init__()
         self.net = init_2d_weight(UNet(in_chns=in_chns, class_num=class_num))
-        self.fp_noise_std = fp_noise_std
-        self.fp_noise_clip = fp_noise_clip
+        self.fp_dropout_p = fp_dropout_p
 
     def forward(self, x, return_fp=False):
-        logits = self.net(x)
+        features = self.net.encoder(x)
+        logits = self.net.decoder(features)
         if not return_fp:
             return logits
-        noise = torch.clamp(torch.randn_like(x) * self.fp_noise_std, -self.fp_noise_clip, self.fp_noise_clip)
-        logits_fp = self.net(x + noise)
-        return logits, logits_fp
+        fp_features = [
+            torch.nn.functional.dropout2d(feature, p=self.fp_dropout_p, training=True)
+            for feature in features
+        ]
+        merged_features = [
+            torch.cat((feature, fp_feature), dim=0)
+            for feature, fp_feature in zip(features, fp_features)
+        ]
+        outputs = self.net.decoder(merged_features)
+        out, out_fp = outputs.chunk(2)
+        return out, out_fp
 
 
 def build_dataloaders(args, cfg):
@@ -372,8 +378,6 @@ def main(args, cfg, save_path, cp_path):
     model = FeaturePerturbationUNet(
         in_chns=1,
         class_num=cfg['nclass'],
-        fp_noise_std=args.fp_noise_std,
-        fp_noise_clip=args.fp_noise_clip,
     ).cuda()
     optimizer = SGD(model.parameters(), lr=cfg['lr'], momentum=0.9, weight_decay=1e-4)
     criterion_l = nn.CrossEntropyLoss(ignore_index=255).cuda()

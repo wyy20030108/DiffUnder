@@ -1,3 +1,4 @@
+CrossMatch: https://arxiv.org/pdf/2405.00354
 | **Methods** |    **RV**     |    **Myo**      |     **LV**      | **Average Dice** | **Average Jac.** |
 |:----------- |:-----         |:--------------  |:--------------  |:---------------  |:---------------  |
 |   FullSup  |                |                 |                 |                  |                  |

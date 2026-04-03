@@ -45,7 +45,14 @@ def download_dataset(repo_name, save_path):
             local_dir_use_symlinks=False,  
             resume_download=True,          
             max_workers=8,                 
-            ignore_patterns=[".gitattributes", "README.md", "LICENSE"]
+            ignore_patterns=[
+                ".gitattributes", 
+                "README.md", 
+                "LICENSE", 
+                ".DS_Store",       # 忽略根目录的 Mac 垃圾文件
+                "*/.DS_Store",     # 忽略子文件夹的 Mac 垃圾文件
+                "__MACOSX/*"       # 顺手把另一个常见的 Mac 垃圾文件夹也屏蔽掉
+            ]
         )
         print(f"\n🎉 数据集已成功下载到: {save_path}")
         
@@ -58,7 +65,7 @@ def download_dataset(repo_name, save_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo", type=str, default="YongchengYAO/ACDC", help="Dataset repository name")
+    parser.add_argument("--repo", type=str, default="limberc/LA2018", help="Dataset repository name")
     parser.add_argument("--save-path", type=str, required=True, help="Local path to save dataset")
     
     args = parser.parse_args()
