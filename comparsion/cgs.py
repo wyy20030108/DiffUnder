@@ -520,7 +520,7 @@ def generate_ovr_pseudo_label(pseudo, num_classes):
 
 def diagnosis(outputs_ovr_soft):
     k = len(outputs_ovr_soft)
-    pseudo = [torch.argmax(item[:, 1, ...], dim=1) for item in outputs_ovr_soft]
+    pseudo = [torch.argmax(item, dim=1) for item in outputs_ovr_soft]
     pseudo = torch.stack(pseudo, dim=0)
     diag_matrix = torch.sum(pseudo, dim=0)
     return (diag_matrix == 0) | (diag_matrix == (2 * k - 1))
@@ -533,7 +533,9 @@ def generate_pseudo_label_withmask(outputs_ovr_soft, num_classes):
         logits_map.append(item[:, 1, ...])
     logits_map = torch.stack(logits_map, dim=1)
     mask = diagnosis(outputs_ovr_soft)
-    mask_with_channel = mask.unsqueeze(1).expand(-1, num_classes, -1, -1)
+    if mask.ndim != 3:
+        raise ValueError(f'OVR diagnosis mask should be [B, H, W], but got shape {tuple(mask.shape)}')
+    mask_with_channel = torch.stack([mask] * num_classes, dim=1)
     return logits_map.detach(), mask.detach(), mask_with_channel.detach()
 
 

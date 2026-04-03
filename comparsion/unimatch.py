@@ -23,7 +23,6 @@ import torch.nn as nn
 from torch.optim import SGD
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.amp import autocast, GradScaler
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
@@ -31,7 +30,7 @@ sys.path.append(project_root)
 from models.unet2d import UNet
 from utils.classes import CLASSES
 from utils.datasets import DATASET_CONFIGS
-from utils.util import count_params, init_log, AverageMeter
+from utils.util import count_params, init_log, AverageMeter, DiceLoss
 from utils.val import eval_2d
 
 
@@ -48,8 +47,6 @@ def get_parser(datasetname):
     parser.add_argument('--exp', type=str, required=True)
     parser.add_argument('--checkpoint_path', type=str, default='/data/lhy_data/checkpoints_wyy')
     parser.add_argument('--deterministic', type=str, default=False)
-    parser.add_argument('--mixed_precision', action='store_true', default=True)
-    parser.add_argument('--no_mixed_precision', action='store_false', dest='mixed_precision')
     parser.add_argument('--conf_thresh', type=float, default=0.95)
     parser.add_argument('--cutmix_p', type=float, default=0.5)
     parser.add_argument('--strong_p', type=float, default=0.8)
@@ -372,7 +369,6 @@ def main(args, cfg, save_path, cp_path):
     logger.info('{}\n'.format(pprint.pformat(all_args)))
     writer = SummaryWriter(save_path)
 
-    amp_enabled = args.mixed_precision and torch.cuda.is_available()
     model = FeaturePerturbationUNet(
         in_chns=1,
         class_num=cfg['nclass'],
@@ -380,8 +376,8 @@ def main(args, cfg, save_path, cp_path):
         fp_noise_clip=args.fp_noise_clip,
     ).cuda()
     optimizer = SGD(model.parameters(), lr=cfg['lr'], momentum=0.9, weight_decay=1e-4)
-    scaler = GradScaler(device='cuda', enabled=amp_enabled)
     criterion_l = nn.CrossEntropyLoss(ignore_index=255).cuda()
+    diceloss = DiceLoss(cfg['nclass']).cuda()
     criterion_u = nn.CrossEntropyLoss(reduction='none').cuda()
 
     logger.info('use {} gpus!'.format(torch.cuda.device_count()))
@@ -403,8 +399,6 @@ def main(args, cfg, save_path, cp_path):
         checkpoint = torch.load(latest_path, weights_only=False)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
-        if 'scaler' in checkpoint:
-            scaler.load_state_dict(checkpoint['scaler'])
         epoch = checkpoint['epoch']
         previous_best = checkpoint['previous_best']
         best_epoch = checkpoint.get('best_epoch', 0)
@@ -456,58 +450,58 @@ def main(args, cfg, save_path, cp_path):
             model.train()
             num_lb, num_ulb = img_x.shape[0], img_u_w.shape[0]
 
-            with autocast(device_type='cuda', enabled=amp_enabled):
-                preds, preds_fp = model(torch.cat((img_x, img_u_w)), return_fp=True)
-                pred_x, pred_u_w = preds.split([num_lb, num_ulb])
-                pred_u_w_fp = preds_fp[num_lb:]
-                pred_u_s1, pred_u_s2 = model(torch.cat((img_u_s1, img_u_s2))).chunk(2)
+            preds, preds_fp = model(torch.cat((img_x, img_u_w)), return_fp=True)
+            pred_x, pred_u_w = preds.split([num_lb, num_ulb])
+            pred_u_w_fp = preds_fp[num_lb:]
+            pred_u_s1, pred_u_s2 = model(torch.cat((img_u_s1, img_u_s2))).chunk(2)
 
-                pred_u_w = pred_u_w.detach()
-                conf_u_w = pred_u_w.softmax(dim=1).max(dim=1)[0]
-                mask_u_w = pred_u_w.argmax(dim=1)
+            pred_u_w = pred_u_w.detach()
+            conf_u_w = pred_u_w.softmax(dim=1).max(dim=1)[0]
+            mask_u_w = pred_u_w.argmax(dim=1)
 
-                mask_u_w_cutmixed1 = mask_u_w.clone()
-                conf_u_w_cutmixed1 = conf_u_w.clone()
-                ignore_mask_cutmixed1 = ignore_mask.clone()
+            mask_u_w_cutmixed1 = mask_u_w.clone()
+            conf_u_w_cutmixed1 = conf_u_w.clone()
+            ignore_mask_cutmixed1 = ignore_mask.clone()
 
-                mask_u_w_cutmixed2 = mask_u_w.clone()
-                conf_u_w_cutmixed2 = conf_u_w.clone()
-                ignore_mask_cutmixed2 = ignore_mask.clone()
+            mask_u_w_cutmixed2 = mask_u_w.clone()
+            conf_u_w_cutmixed2 = conf_u_w.clone()
+            ignore_mask_cutmixed2 = ignore_mask.clone()
 
-                mask_u_w_cutmixed1[cutmix_box1 == 1] = mask_u_w_mix[cutmix_box1 == 1]
-                conf_u_w_cutmixed1[cutmix_box1 == 1] = conf_u_w_mix[cutmix_box1 == 1]
-                ignore_mask_cutmixed1[cutmix_box1 == 1] = ignore_mask_mix[cutmix_box1 == 1]
+            mask_u_w_cutmixed1[cutmix_box1 == 1] = mask_u_w_mix[cutmix_box1 == 1]
+            conf_u_w_cutmixed1[cutmix_box1 == 1] = conf_u_w_mix[cutmix_box1 == 1]
+            ignore_mask_cutmixed1[cutmix_box1 == 1] = ignore_mask_mix[cutmix_box1 == 1]
 
-                mask_u_w_cutmixed2[cutmix_box2 == 1] = mask_u_w_mix[cutmix_box2 == 1]
-                conf_u_w_cutmixed2[cutmix_box2 == 1] = conf_u_w_mix[cutmix_box2 == 1]
-                ignore_mask_cutmixed2[cutmix_box2 == 1] = ignore_mask_mix[cutmix_box2 == 1]
+            mask_u_w_cutmixed2[cutmix_box2 == 1] = mask_u_w_mix[cutmix_box2 == 1]
+            conf_u_w_cutmixed2[cutmix_box2 == 1] = conf_u_w_mix[cutmix_box2 == 1]
+            ignore_mask_cutmixed2[cutmix_box2 == 1] = ignore_mask_mix[cutmix_box2 == 1]
 
-                loss_x = criterion_l(pred_x, mask_x)
+            loss_dice = diceloss(pred_x, mask_x)
+            loss_x = (criterion_l(pred_x, mask_x) + loss_dice) / 2.0
 
-                valid_mask_s1 = (conf_u_w_cutmixed1 >= args.conf_thresh) & (ignore_mask_cutmixed1 != 255)
-                loss_u_s1 = criterion_u(pred_u_s1, mask_u_w_cutmixed1)
-                loss_u_s1 = loss_u_s1 * valid_mask_s1
-                denom_s1 = max((ignore_mask_cutmixed1 != 255).sum().item(), 1)
-                loss_u_s1 = loss_u_s1.sum() / denom_s1
+            valid_mask_s1 = (conf_u_w_cutmixed1 >= args.conf_thresh) & (ignore_mask_cutmixed1 != 255)
+            loss_u_s1 = criterion_u(pred_u_s1, mask_u_w_cutmixed1)
+            loss_u_s1 = loss_u_s1 * valid_mask_s1
+            denom_s1 = max((ignore_mask_cutmixed1 != 255).sum().item(), 1)
+            loss_u_s1 = loss_u_s1.sum() / denom_s1
 
-                valid_mask_s2 = (conf_u_w_cutmixed2 >= args.conf_thresh) & (ignore_mask_cutmixed2 != 255)
-                loss_u_s2 = criterion_u(pred_u_s2, mask_u_w_cutmixed2)
-                loss_u_s2 = loss_u_s2 * valid_mask_s2
-                denom_s2 = max((ignore_mask_cutmixed2 != 255).sum().item(), 1)
-                loss_u_s2 = loss_u_s2.sum() / denom_s2
+            valid_mask_s2 = (conf_u_w_cutmixed2 >= args.conf_thresh) & (ignore_mask_cutmixed2 != 255)
+            loss_u_s2 = criterion_u(pred_u_s2, mask_u_w_cutmixed2)
+            loss_u_s2 = loss_u_s2 * valid_mask_s2
+            denom_s2 = max((ignore_mask_cutmixed2 != 255).sum().item(), 1)
+            loss_u_s2 = loss_u_s2.sum() / denom_s2
 
-                valid_mask_fp = (conf_u_w >= args.conf_thresh) & (ignore_mask != 255)
-                loss_u_w_fp = criterion_u(pred_u_w_fp, mask_u_w)
-                loss_u_w_fp = loss_u_w_fp * valid_mask_fp
-                denom_fp = max((ignore_mask != 255).sum().item(), 1)
-                loss_u_w_fp = loss_u_w_fp.sum() / denom_fp
+            valid_mask_fp = (conf_u_w >= args.conf_thresh) & (ignore_mask != 255)
+            loss_u_w_fp = criterion_u(pred_u_w_fp, mask_u_w)
+            loss_u_w_fp = loss_u_w_fp * valid_mask_fp
+            denom_fp = max((ignore_mask != 255).sum().item(), 1)
+            loss_u_w_fp = loss_u_w_fp.sum() / denom_fp
 
-                loss = (loss_x + loss_u_s1 * 0.25 + loss_u_s2 * 0.25 + loss_u_w_fp * 0.5) / 2.0
-
+            # loss = (loss_x + loss_u_s1 * 0.25 + loss_u_s2 * 0.25 + loss_u_w_fp * 0.5) / 2.0
+            loss = loss_x + loss_u_s1 * 0.05 + loss_u_s2 * 0.05 + loss_u_w_fp * 0.1
+            
             optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            loss.backward()
+            optimizer.step()
 
             total_loss.update(loss.item())
             total_loss_x.update(loss_x.item())
@@ -559,7 +553,6 @@ def main(args, cfg, save_path, cp_path):
         checkpoint = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'scaler': scaler.state_dict(),
             'epoch': epoch,
             'previous_best': previous_best,
             'best_epoch': best_epoch,

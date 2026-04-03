@@ -1,8 +1,8 @@
 #!/bin/bash
-GPUID=3
+GPUID=4
 
 CUDA_VISIBLE_DEVICES=$GPUID python comparsion/cgs.py \
  --cli_dataset "20acdc" \
- --seed 2025 \
+ --seed 2026 \
  --exp "CGS" \
  --device "cuda:$GPUID"
