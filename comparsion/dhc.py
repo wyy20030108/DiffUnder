@@ -48,7 +48,7 @@ def get_parser(datasetname):
     parser.add_argument('--no_mixed_precision', action='store_false', dest='mixed_precision')
     parser.add_argument('--cps_loss', type=str, default='wce')
     parser.add_argument('--sup_loss', type=str, default='w_ce+dice')
-    parser.add_argument('--cps_w', type=float, default=1.0)
+    parser.add_argument('--cps_w', type=float, default=0.1)
     parser.add_argument('--cps_rampup', action='store_true', default=True)
     parser.add_argument('--no_cps_rampup', action='store_false', dest='cps_rampup')
     parser.add_argument('--consistency_rampup', type=float, default=None)
