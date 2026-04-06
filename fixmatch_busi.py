@@ -1,3 +1,4 @@
+# mask 存在多个划分, mask 1,2,3... 读取逻辑还没有设计
 import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True,max_split_size_mb:128')

@@ -167,7 +167,8 @@ def main(args, cfg, save_path, cp_path):
     logger.info('Total params: {:.3f}M'.format(count_params(model)))
 
     trainloader_l, trainloader_u, trainloader_u_mix, valloader = build_dataloaders(args, cfg)
-    total_iters = len(trainloader_u) * cfg['epochs']
+    steps_per_epoch = min(len(trainloader_l), len(trainloader_u), len(trainloader_u_mix))
+    total_iters = steps_per_epoch * cfg['epochs']
     logger.info('Total iters: %d' % total_iters)
     class_names = build_class_names(cfg, args)
 
@@ -193,7 +194,7 @@ def main(args, cfg, save_path, cp_path):
         thresh_controller.thresh_global = checkpoint.get('thresh_global', thresh_controller.thresh_global).cuda()
         logger.info('************ Load from checkpoint at epoch %i\n' % epoch)
 
-    log_interval = max(len(trainloader_u) // 8, 1)
+    log_interval = max(steps_per_epoch // 8, 1)
     for epoch in range(epoch + 1, cfg['epochs']):
         logger.info(
             f'===> Epoch: {epoch}/{cfg["epochs"]}, seed:{args.seed}, labelnum:{args.labelnum}, '
@@ -337,29 +338,31 @@ def main(args, cfg, save_path, cp_path):
             mask_ratio = ((conf_u_w >= thresh_global) & (ignore_mask != 255)).sum().item() / valid_w
             total_mask_ratio.update(mask_ratio)
 
-            iters = epoch * len(trainloader_u) + i
-            lr = cfg['lr'] * (1 - iters / max(total_iters, 1)) ** 0.9
+            current_iter = iter_num
+            lr = cfg['lr'] * (1 - current_iter / max(total_iters, 1)) ** 0.9
             optimizer.param_groups[0]['lr'] = lr
             iter_num += 1
+            global_step = iter_num
 
-            writer.add_scalar('train/loss_all', loss.item(), iters)
-            writer.add_scalar('train/loss_x', loss_x.item(), iters)
-            writer.add_scalar('train/loss_ce_x', loss_ce_x.item(), iters)
-            writer.add_scalar('train/loss_dice_x', loss_dice_x.item(), iters)
-            writer.add_scalar('train/loss_corr_ce', loss_x_corr.item(), iters)
-            writer.add_scalar('train/loss_s', loss_u_s1.item(), iters)
-            writer.add_scalar('train/loss_kl', loss_u_kl.item(), iters)
-            writer.add_scalar('train/loss_w_fp', loss_u_w_fp.item(), iters)
-            writer.add_scalar('train/loss_corr_u', loss_u_corr.item(), iters)
-            writer.add_scalar('train/mask_ratio', mask_ratio, iters)
-            writer.add_scalar('train/thresh_global', thresh_global.item(), iters)
-            writer.add_scalar('train/lr', lr, iters)
+            writer.add_scalar('train/loss_all', loss.item(), global_step)
+            writer.add_scalar('train/loss_x', loss_x.item(), global_step)
+            writer.add_scalar('train/loss_ce_x', loss_ce_x.item(), global_step)
+            writer.add_scalar('train/loss_dice_x', loss_dice_x.item(), global_step)
+            writer.add_scalar('train/loss_corr_ce', loss_x_corr.item(), global_step)
+            writer.add_scalar('train/loss_s', loss_u_s1.item(), global_step)
+            writer.add_scalar('train/loss_kl', loss_u_kl.item(), global_step)
+            writer.add_scalar('train/loss_w_fp', loss_u_w_fp.item(), global_step)
+            writer.add_scalar('train/loss_corr_u', loss_u_corr.item(), global_step)
+            writer.add_scalar('train/mask_ratio', mask_ratio, global_step)
+            writer.add_scalar('train/thresh_global', thresh_global.item(), global_step)
+            writer.add_scalar('train/lr', lr, global_step)
 
             if i % log_interval == 0:
                 logger.info(
-                    'Iters: {:}, Total loss: {:.3f}, Loss x: {:.3f}, loss_corr_ce: {:.3f}, '
+                    'Iters: {:}/{:}, Total loss: {:.3f}, Loss x: {:.3f}, loss_corr_ce: {:.3f}, '
                     'Loss s: {:.3f}, Loss w_fp: {:.3f}, Mask: {:.3f}, loss_corr_u: {:.3f}'.format(
-                        i,
+                        global_step,
+                        total_iters,
                         total_loss.avg,
                         total_loss_x.avg,
                         total_loss_corr_ce.avg,

@@ -1,7 +1,6 @@
 import os
 import re
 import sys
-import yaml
 import h5py
 import torch
 import argparse
@@ -14,50 +13,29 @@ project_root = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(project_root)
 from Datasets.efficient import ACDCsemiDataset
 from models.unet2d import UNet
-from utils.datasets import DATASET_CONFIGS
 from utils.classes import CLASSES
 
 
-def get_default_args(cli_dataset):
-    if cli_dataset is not None and cli_dataset in DATASET_CONFIGS:
-        defaults = dict(DATASET_CONFIGS[cli_dataset])
-        defaults.setdefault('dataset', cli_dataset)
-        return defaults
-    return {
-        'dataset': 'ACDC',
-        'base_dir': '/data/lhy_data/ACDC',
-        'labelnum': 14,
-        'config': None,
-        'nclass': 4,
-        'crop_size': [256, 256],
-    }
-
-
-def get_parser(defaults):
+def get_parser():
     parser = argparse.ArgumentParser(description='2D test script')
-    parser.add_argument('--dataset', type=str, default=defaults.get('dataset', 'ACDC'))
-    parser.add_argument('--base_dir', type=str, default=defaults.get('base_dir', '/data/lhy_data/ACDC'))
-    parser.add_argument('--labelnum', type=int, default=defaults.get('labelnum', 14))
-    parser.add_argument('--config', type=str, default=defaults.get('config'))
+    parser.add_argument('--dataset', type=str, default='ACDC')
+    parser.add_argument('--base_dir', type=str, default='/data/lhy_data/ACDC')
+    parser.add_argument('--labelnum', type=int, default=14)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--seed', type=int, default=2026)
-    parser.add_argument('--split', type=str, default='test', choices=['test', 'val', 'val_test'])
+    parser.add_argument('--split', type=str, default='test', choices=['test'])
     parser.add_argument('--save_model_path', type=str, required=True)
     parser.add_argument('--use_ema', action='store_true', default=False)
-    parser.add_argument('--nclass', type=int, default=defaults.get('nclass'))
+    parser.add_argument('--nclass', type=int, default=4)
     return parser
 
 
-def load_cfg(args, defaults):
-    cfg = dict(defaults)
-    if args.config is not None:
-        with open(args.config, 'r') as f:
-            cfg.update(yaml.load(f, Loader=yaml.Loader))
-    if args.nclass is not None:
-        cfg['nclass'] = args.nclass
-    cfg.setdefault('crop_size', [256, 256])
-    cfg['dataset'] = args.dataset
-    return cfg
+def build_fixed_cfg(args):
+    return {
+        'dataset': args.dataset,
+        'nclass': args.nclass if args.nclass is not None else 4,
+        'crop_size': [256, 256],
+    }
 
 
 def normalize_crop_size(crop_size):
@@ -232,12 +210,8 @@ def test_acdc(args, cfg):
 
 
 if __name__ == '__main__':
-    data_parser = argparse.ArgumentParser(description='datasets')
-    data_parser.add_argument('--cli_dataset', type=str, default='20acdc')
-    known_args, remaining_args = data_parser.parse_known_args()
-    defaults = get_default_args(known_args.cli_dataset)
-    parser = get_parser(defaults)
-    args = parser.parse_args(remaining_args)
+    parser = get_parser()
+    args = parser.parse_args()
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device.split(':')[-1]
     torch.manual_seed(args.seed)
@@ -245,5 +219,5 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    cfg = load_cfg(args, defaults)
+    cfg = build_fixed_cfg(args)
     test_acdc(args, cfg)
