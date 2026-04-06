@@ -81,20 +81,46 @@ def calculate_metric_percase(pred, gt):
 
 
 def resolve_state_dict(checkpoint, use_ema=False):
-    if isinstance(checkpoint, dict):
-        if use_ema and 'model_ema' in checkpoint:
-            return checkpoint['model_ema']
-        for key in ['model', 'state_dict']:
-            if key in checkpoint:
-                return checkpoint[key]
-    return checkpoint
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    preferred_keys = ['model_ema', 'ema', 'teacher', 'model', 'state_dict', 'student', 'net']
+    if use_ema:
+        preferred_keys = ['model_ema', 'ema', 'teacher', 'model', 'state_dict', 'student', 'net']
+    else:
+        preferred_keys = ['model', 'state_dict', 'student', 'net', 'model_ema', 'ema', 'teacher']
+
+    for key in preferred_keys:
+        value = checkpoint.get(key)
+        if isinstance(value, dict):
+            return value
+
+    is_raw_state_dict = all(isinstance(value, torch.Tensor) for value in checkpoint.values())
+    if is_raw_state_dict:
+        return checkpoint
+
+    raise KeyError(
+        'Cannot resolve state_dict from checkpoint. Available keys: {}'.format(list(checkpoint.keys()))
+    )
+
+
+def sanitize_state_dict(state_dict):
+    if not isinstance(state_dict, dict):
+        return state_dict
+    sanitized = {}
+    for key, value in state_dict.items():
+        new_key = key
+        if new_key.startswith('module.'):
+            new_key = new_key[len('module.'):]
+        sanitized[new_key] = value
+    return sanitized
 
 
 def load_model(args, cfg):
     model = UNet(in_chns=1, class_num=cfg['nclass']).cuda()
     checkpoint = torch.load(args.save_model_path, map_location='cpu', weights_only=False)
-    state_dict = resolve_state_dict(checkpoint, use_ema=args.use_ema)
-    model.load_state_dict(state_dict, strict=True)
+    state_dict = sanitize_state_dict(resolve_state_dict(checkpoint, use_ema=args.use_ema))
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model
 
