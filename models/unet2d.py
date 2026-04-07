@@ -221,7 +221,7 @@ class UNet(nn.Module):
         )
         self.corr = Corr(in_channels=params['feature_chns'][0], nclass=class_num)
 
-    def forward(self, x, need_fp=False, use_corr=False):
+    def forward(self, x, need_fp=False, use_corr=False, use_feature=False):
         feature = self.encoder(x)
         dict_return = {}
 
@@ -245,6 +245,9 @@ class UNet(nn.Module):
 
         decoder_feature = self.decoder(feature)
         out = self.classifier(decoder_feature)
+        if use_feature:
+            return out, decoder_feature
+
         if use_corr:
             proj_feats = self.proj(feature[-1])
             corr_out_dict = self.corr(proj_feats, out)
