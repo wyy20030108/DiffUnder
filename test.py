@@ -86,9 +86,9 @@ def resolve_state_dict(checkpoint, use_ema=False):
 
     preferred_keys = ['model_ema', 'ema', 'teacher', 'model', 'state_dict', 'student', 'net']
     if use_ema:
-        preferred_keys = ['model_ema', 'ema', 'teacher', 'model', 'state_dict', 'student', 'net']
+        preferred_keys = ['model_ema', 'ema', 'teacher', 'model2', 'model', 'state_dict', 'student', 'net']
     else:
-        preferred_keys = ['model', 'state_dict', 'student', 'net', 'model_ema', 'ema', 'teacher']
+        preferred_keys = ['model', 'model1', 'state_dict', 'student', 'net', 'model_ema', 'ema', 'teacher', 'model2']
 
     for key in preferred_keys:
         value = checkpoint.get(key)
