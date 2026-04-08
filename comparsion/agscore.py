@@ -24,7 +24,7 @@ from utils.util import count_params, init_log, AverageMeter, DiceLoss
 from utils.val import eval_2d
 
 class AgScoreLabelFilter:
-    def __init__(self, num_pos_agents=64, num_neg_agents=256):
+    def __init__(self, num_pos_agents=64, num_neg_agents=256, reduced_size=64, subsample_size=8192, gmm_grid_size=512):
         """
         初始化 AgScore 伪标签过滤器 (ICML 2025)
         参数:
@@ -33,6 +33,38 @@ class AgScoreLabelFilter:
         """
         self.N = num_pos_agents
         self.M = num_neg_agents
+        self.reduced_size = reduced_size
+        self.subsample_size = subsample_size
+        self.gmm_grid_size = gmm_grid_size
+
+    def _reduce_inputs(self, features, confidences, pseudo_labels):
+        _, _, h, w = features.shape
+        if max(h, w) <= self.reduced_size:
+            return features, confidences, pseudo_labels, None
+        reduced_h = min(h, self.reduced_size)
+        reduced_w = min(w, self.reduced_size)
+        reduced_features = F.adaptive_avg_pool2d(features, output_size=(reduced_h, reduced_w))
+        reduced_confidences = F.adaptive_avg_pool2d(confidences.unsqueeze(1), output_size=(reduced_h, reduced_w)).squeeze(1)
+        reduced_pseudo = F.interpolate(
+            pseudo_labels.unsqueeze(1).float(),
+            size=(reduced_h, reduced_w),
+            mode='nearest'
+        ).squeeze(1).long()
+        return reduced_features, reduced_confidences, reduced_pseudo, (h, w)
+
+    def _solve_threshold(self, gmm, fit_scores, correct_idx):
+        lower = float(np.min(fit_scores))
+        upper = float(np.max(fit_scores))
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            return None
+        if abs(upper - lower) < 1e-8:
+            return None
+        grid = np.linspace(lower, upper, num=self.gmm_grid_size, dtype=np.float64).reshape(-1, 1)
+        probas = gmm.predict_proba(grid)[:, correct_idx]
+        valid_indices = np.where(probas > 0.5)[0]
+        if valid_indices.size == 0:
+            return None
+        return float(grid[valid_indices[0], 0])
 
     def _orthogonal_selection(self, candidates, M):
         """
@@ -150,15 +182,18 @@ class AgScoreLabelFilter:
     def get_pseudo_label_mask(self, features, confidences, pseudo_labels, fallback_threshold=0.95):
         """ 主调用接口 """
         B, H, W = pseudo_labels.shape
+        reduced_features, reduced_confidences, reduced_pseudo_labels, original_size = self._reduce_inputs(
+            features, confidences, pseudo_labels
+        )
         
         # 1. 构建代理
-        A_p, A_n = self._build_agents(features, confidences, pseudo_labels)
+        A_p, A_n = self._build_agents(reduced_features, reduced_confidences, reduced_pseudo_labels)
         if A_p is None or A_n is None:
             # 安全回退机制：退化为固定的 confidence 阈值
             return confidences >= fallback_threshold
             
         # 2. 计算 AgScore
-        ag_scores = self._calculate_agscore(features, A_p, A_n)
+        ag_scores = self._calculate_agscore(reduced_features, A_p, A_n)
         
         # 3. GMM 模型拟合过滤 (DivideMix 逻辑)
         scores_np = ag_scores.detach().cpu().numpy().reshape(-1, 1)
@@ -168,7 +203,7 @@ class AgScoreLabelFilter:
             return confidences >= fallback_threshold
         
         # 【重要提速优化】: 随机采样 5 万个像素来 fit GMM，避免 100 万级像素 fit 卡死训练
-        subsample_size = 50000 
+        subsample_size = self.subsample_size
         if scores_np.shape[0] > subsample_size:
             sampled_indices = np.random.choice(scores_np.shape[0], subsample_size, replace=False)
             fit_scores = scores_np[sampled_indices]
@@ -198,14 +233,17 @@ class AgScoreLabelFilter:
             if any(issubclass(w.category, ConvergenceWarning) for w in caught_warnings) or (hasattr(gmm, 'converged_') and not gmm.converged_):
                 return confidences >= fallback_threshold
             correct_idx = np.argmax(gmm.means_)
-            
-            # predict 仍旧在所有像素上进行，保障全局 Mask 完整
-            probas = gmm.predict_proba(scores_np) 
-            correct_probas = probas[:, correct_idx]
-            
-            # P(correct | Si) > 0.5
-            valid_mask = torch.tensor(correct_probas > 0.5, device=features.device).reshape(B, H, W)
-            return valid_mask
+            threshold = self._solve_threshold(gmm, fit_scores, correct_idx)
+            if threshold is None:
+                return confidences >= fallback_threshold
+            valid_mask = ag_scores >= threshold
+            if original_size is not None:
+                valid_mask = F.interpolate(
+                    valid_mask.unsqueeze(1).float(),
+                    size=original_size,
+                    mode='nearest'
+                ).squeeze(1) > 0.5
+            return valid_mask.reshape(B, H, W)
         except Exception:
             # 防止 GMM 极端情况下崩溃
             return confidences >= fallback_threshold
@@ -228,6 +266,11 @@ def get_parser(datasetname):
     parser.add_argument('--normal', type=bool, help='celoss normal or something-aware')
     parser.add_argument('--checkpoint_path', type=str, default='/data/lhy_data/checkpoints_wyy')
     parser.add_argument('--deterministic', type=str, default=False)
+    parser.add_argument('--num_workers', type=int, default=2)
+    parser.add_argument('--val_num_workers', type=int, default=1)
+    parser.add_argument('--agscore_reduced_size', type=int, default=64)
+    parser.add_argument('--agscore_subsample_size', type=int, default=8192)
+    parser.add_argument('--agscore_gmm_grid_size', type=int, default=512)
 
     return parser
 
@@ -276,7 +319,7 @@ def main(args, cfg, save_path, cp_path):
     trainset_l = ACDCsemiDataset('train_l', args, cfg['crop_size']) 
 
     valset = ACDCsemiDataset('val', args, cfg['crop_size'])
-    valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=1, drop_last=False)
+    valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=args.val_num_workers, drop_last=False)
 
     # 2. 定义 Batch Size 分配
     labeled_bs = cfg['batch_size']
@@ -297,7 +340,7 @@ def main(args, cfg, save_path, cp_path):
     trainloader = DataLoader(
         train_dataset,
         batch_sampler=batch_sampler,
-        num_workers=6,
+        num_workers=args.num_workers,
         pin_memory=True,
         collate_fn=mix_collate_fn
     )
@@ -328,7 +371,13 @@ def main(args, cfg, save_path, cp_path):
     else:
         start_time = time.time()
 
-    ag_filter = AgScoreLabelFilter(num_pos_agents=64, num_neg_agents=256)
+    ag_filter = AgScoreLabelFilter(
+        num_pos_agents=64,
+        num_neg_agents=256,
+        reduced_size=args.agscore_reduced_size,
+        subsample_size=args.agscore_subsample_size,
+        gmm_grid_size=args.agscore_gmm_grid_size,
+    )
     for epoch in range(epoch + 1, cfg['epochs']):
         all_epoch, exp = cfg['epochs'], args.exp.split('_')[-1]
         logger.info(f'===> Epoch: {epoch}/{all_epoch}, {exp}, seed:{args.seed}, labelnum: {args.labelnum}, Previous best mdice '
