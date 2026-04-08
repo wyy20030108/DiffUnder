@@ -1,0 +1,36 @@
+# ==========================================
+# Arguments for Dataset (BUSI)
+# ==========================================
+dataset: BUSI
+nclass: 2
+labelnum: 32             # 64, 32 ,16
+num: None
+crop_size: [256, 256]
+val_patch_size: [256, 256]
+base_dir: /data/lhy_data/BUSI/Dataset_BUSI_with_GT/without_normal
+
+# ==========================================
+# Arguments for DataLoader
+# ==========================================
+batch_size: 8          
+num_workers: 8
+
+# ==========================================
+# Arguments for Model
+# ==========================================
+model: unet_2d          
+backbone: resnet34       
+baseline: unet
+lock_backbone: False
+
+# ==========================================
+# Arguments for Semi-Supervised Training
+# ==========================================
+epochs: 200
+conf_thresh: 0.95        
+unsup_loss_weight: 0.1   
+
+# ==========================================
+# Arguments for Optimizer & Scheduler
+# ==========================================
+lr: 0.01

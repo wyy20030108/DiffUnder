@@ -275,21 +275,23 @@ class SemiDataset2D(Dataset):
         return torch.from_numpy(np.asarray(mask, dtype=np.uint8)).long()
 
     def _normalize_size(self):
-        if self.size is None:
+        size_cfg = getattr(self.args, 'crop_size', None)
+        size_value = self.size if size_cfg is None else size_cfg
+        if size_value is None:
             return None
-        if isinstance(self.size, int):
-            return self.size
-        if isinstance(self.size, (list, tuple)):
-            if len(self.size) == 0:
+        if isinstance(size_value, int):
+            return size_value
+        if isinstance(size_value, (list, tuple)):
+            if len(size_value) == 0:
                 return None
-            if len(self.size) == 1:
-                return int(self.size[0])
-            if int(self.size[0]) != int(self.size[1]):
-                raise ValueError(f"SemiDataset2D expects square crop size, but got {self.size}")
-            return int(self.size[0])
-        return int(self.size)
+            if len(size_value) == 1:
+                return int(size_value[0])
+            if int(size_value[0]) != int(size_value[1]):
+                raise ValueError(f"SemiDataset2D expects square crop size, but got {size_value}")
+            return int(size_value[0])
+        return int(size_value)
 
-    def _apply_train_aug(self, image, mask, ignore_value):
+    def _apply_train_aug(self, image, mask):
         crop_size = self._normalize_size()
         if crop_size is not None:
             image, mask = crop(image, mask, crop_size, ignore_value=ignore_value)
@@ -469,15 +471,17 @@ class ACDCsemiDataset(Dataset):
         return torch.from_numpy(np.asarray(mask, dtype=np.uint8).copy()).long()
 
     def _normalize_size(self):
-        if self.size is None:
+        size_cfg = getattr(self.args, 'crop_size', None)
+        size_value = self.size if size_cfg is None else size_cfg
+        if size_value is None:
             return None
-        if isinstance(self.size, int):
-            return self.size
-        if isinstance(self.size, (list, tuple)):
-            if len(self.size) == 0:
+        if isinstance(size_value, int):
+            return size_value
+        if isinstance(size_value, (list, tuple)):
+            if len(size_value) == 0:
                 return None
-            return int(self.size[0])
-        return int(self.size)
+            return int(size_value[0])
+        return int(size_value)
 
     def _apply_train_aug(self, image, mask, ignore_value):
         crop_size = self._normalize_size()
@@ -554,19 +558,21 @@ class BUSISemiDataset(Dataset):
         raise ValueError(f'Invalid ratio_range: {ratio_range}')
 
     def _normalize_size(self):
-        if self.size is None:
+        size_cfg = getattr(self.args, 'crop_size', None)
+        size_value = self.size if size_cfg is None else size_cfg
+        if size_value is None:
             return None
-        if isinstance(self.size, int):
-            return self.size
-        if isinstance(self.size, (list, tuple)):
-            if len(self.size) == 0:
+        if isinstance(size_value, int):
+            return size_value
+        if isinstance(size_value, (list, tuple)):
+            if len(size_value) == 0:
                 return None
-            if len(self.size) == 1:
-                return int(self.size[0])
-            if int(self.size[0]) != int(self.size[1]):
-                raise ValueError(f'BUSISemiDataset expects square crop size, but got {self.size}')
-            return int(self.size[0])
-        return int(self.size)
+            if len(size_value) == 1:
+                return int(size_value[0])
+            if int(size_value[0]) != int(size_value[1]):
+                raise ValueError(f'BUSISemiDataset expects square crop size, but got {size_value}')
+            return int(size_value[0])
+        return int(size_value)
 
     def _canonical_relpath(self, path):
         return os.path.normpath(path).replace('\\', '/')
@@ -738,7 +744,7 @@ class BUSISemiDataset(Dataset):
                     mask_path = self._resolve_to_abs_path(mask_key)
                     if mask_path is None:
                         raise FileNotFoundError(f'Cannot resolve BUSI mask path from split item: {mask_key}')
-                    record['mask_path'] = mask_path
+                    record['mask_path'] = [mask_path]
                 records.append(record)
         return records
 
@@ -782,7 +788,8 @@ class BUSISemiDataset(Dataset):
         return self.all_records
 
     def _load_image(self, image_path):
-        return Image.open(image_path).convert('RGB')
+        with Image.open(image_path) as img:
+            return img.convert('RGB')
 
     def _load_mask(self, mask_paths):
         if not mask_paths:
@@ -805,12 +812,11 @@ class BUSISemiDataset(Dataset):
                 
         return Image.fromarray(combined_mask)
 
-    def _apply_train_aug(self, image, mask, ignore_value):
-        if self.ratio_range is not None:
-            image, mask = resize(image, mask, self.ratio_range)
+    def _apply_train_aug(self, image, mask):
         crop_size = self._normalize_size()
         if crop_size is not None:
-            image, mask = crop(image, mask, crop_size, ignore_value=ignore_value)
+            image = image.resize((crop_size, crop_size), Image.BILINEAR)
+            mask = mask.resize((crop_size, crop_size), Image.NEAREST)
         image, mask = hflip(image, mask)
         return image, mask
 
@@ -824,11 +830,11 @@ class BUSISemiDataset(Dataset):
         mask = self._build_empty_mask(image) if self.mode == 'train_u' else self._load_mask(sample['mask_path'])
 
         if self.mode == 'train_l':
-            image, mask = self._apply_train_aug(image, mask, ignore_value=255)
+            image, mask = self._apply_train_aug(image, mask)
             return normalize(image, mask)
 
         if self.mode == 'train_u':
-            image_w, mask_w = self._apply_train_aug(image, mask, ignore_value=254)
+            image_w, mask_w = self._apply_train_aug(image, mask)
             image_s = blur(deepcopy(image_w), p=0.5)
             ignore_mask = np.zeros(np.asarray(mask_w).shape, dtype=np.uint8)
             ignore_mask[np.asarray(mask_w) == 254] = 255

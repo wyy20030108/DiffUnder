@@ -83,4 +83,25 @@ DATASET_CONFIGS = {
         'num': 67,
         'label_help': '14 for 1:5; 7 for 1:10; 3 for 1:20',
     },
+    '8busi': {
+        'config': 'configs/BUSI/8busi.yaml',
+        'base_dir': '/data/lhy_data/BUSI/Dataset_BUSI_with_GT/without_normal',
+        'labelnum': 64,  
+        'num': None,
+        'label_help': '64 for 1:8; 7 for 1:16; 3 for 1:32',
+    },
+    '16busi': {
+        'config': 'configs/BUSI/16busi.yaml',
+        'base_dir': '/data/lhy_data/BUSI/Dataset_BUSI_with_GT/without_normal',
+        'labelnum': 32, 
+        'num': None,
+        'label_help': '64 for 1:8; 7 for 1:16; 3 for 1:32',
+    },
+    '32busi': {
+        'config': 'configs/BUSI/32busi.yaml',
+        'base_dir': '/data/lhy_data/BUSI/Dataset_BUSI_with_GT/without_normal',
+        'labelnum': 16,  
+        'num': None,
+        'label_help': '64 for 1:8; 7 for 1:16; 3 for 1:32',
+    },
 }
