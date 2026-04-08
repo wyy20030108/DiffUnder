@@ -585,36 +585,7 @@ class BUSISemiDataset(Dataset):
         if parent_name in self.MASK_DIR_NAMES:
             return True
         stem = os.path.splitext(os.path.basename(abs_path))[0].lower()
-        return any(stem.endswith(suffix) for suffix in self.MASK_SUFFIXES)
-
-    # def _resolve_mask_path(self, image_path):
-    #     image_dir = os.path.dirname(image_path)
-    #     image_stem = os.path.splitext(os.path.basename(image_path))[0]
-    #     ext_candidates = list(dict.fromkeys([
-    #         os.path.splitext(image_path)[1].lower(),
-    #         *self.IMAGE_EXTENSIONS,
-    #     ]))
-
-    #     candidate_paths = []
-    #     for suffix in self.MASK_SUFFIXES:
-    #         for ext in ext_candidates:
-    #             candidate_paths.append(os.path.join(image_dir, f'{image_stem}{suffix}{ext}'))
-
-    #     parent_dir = os.path.dirname(image_dir)
-    #     for folder_name in self.MASK_DIR_NAMES:
-    #         mask_dir = os.path.join(image_dir, folder_name)
-    #         parent_mask_dir = os.path.join(parent_dir, folder_name)
-    #         for ext in ext_candidates:
-    #             candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{ext}'))
-    #             candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{ext}'))
-    #             for suffix in self.MASK_SUFFIXES:
-    #                 candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{suffix}{ext}'))
-    #                 candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{suffix}{ext}'))
-
-    #     for candidate_path in candidate_paths:
-    #         if os.path.isfile(candidate_path):
-    #             return candidate_path
-    #     return None
+        return any(suffix in stem for suffix in self.MASK_SUFFIXES)
     
     def _resolve_mask_path(self, image_path):
         """返回一个包含所有匹配 mask 路径的列表"""
@@ -631,15 +602,6 @@ class BUSISemiDataset(Dataset):
         
         return valid_mask_paths if valid_mask_paths else None
 
-    # def _make_record(self, image_path, mask_path=None):
-    #     image_path = os.path.abspath(image_path)
-    #     return {
-    #         'image_path': image_path,
-    #         'mask_path': os.path.abspath(mask_path) if mask_path is not None else None,
-    #         'rel_path': self._canonical_relpath(os.path.relpath(image_path, self.root_path)),
-    #         'stem': os.path.splitext(os.path.basename(image_path))[0],
-    #     }
-    
     def _make_record(self, image_path, mask_paths=None):
         image_path = os.path.abspath(image_path)
         return {
@@ -827,6 +789,16 @@ class BUSISemiDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.name_list[idx]
         image = self._load_image(sample['image_path'])
+        
+        # ======== 最关键的拦截：在试图加载 Mask 之前进行安全检查 ========
+        if self.mode != 'train_u' and not sample['mask_path']:
+            raise FileNotFoundError(
+                f"🚨 致命错误：模型在尝试读取有标签数据时，找不到对应的 Mask！\n"
+                f"原图路径: {sample['image_path']}\n"
+                f"请检查该目录下是否存在以 '{sample['stem']}_' 开头的掩码文件。"
+            )
+        # ================================================================
+        
         mask = self._build_empty_mask(image) if self.mode == 'train_u' else self._load_mask(sample['mask_path'])
 
         if self.mode == 'train_l':
@@ -846,9 +818,8 @@ class BUSISemiDataset(Dataset):
                 cutmix_box
             )
 
-        if sample['mask_path'] is None:
-            raise FileNotFoundError(f"Mask not found for BUSI sample: {sample['image_path']}")
-        return normalize(image, self._load_mask(sample['mask_path']))
+        # 验证集/测试集的返回
+        return normalize(image, mask)
 
     def __len__(self):
         return len(self.name_list)
