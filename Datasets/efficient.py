@@ -1,4 +1,4 @@
-import itertools, torch
+import itertools, torch, glob
 import os, sys, re, random
 import numpy as np
 from torch.utils.data.sampler import Sampler
@@ -581,40 +581,64 @@ class BUSISemiDataset(Dataset):
         stem = os.path.splitext(os.path.basename(abs_path))[0].lower()
         return any(stem.endswith(suffix) for suffix in self.MASK_SUFFIXES)
 
+    # def _resolve_mask_path(self, image_path):
+    #     image_dir = os.path.dirname(image_path)
+    #     image_stem = os.path.splitext(os.path.basename(image_path))[0]
+    #     ext_candidates = list(dict.fromkeys([
+    #         os.path.splitext(image_path)[1].lower(),
+    #         *self.IMAGE_EXTENSIONS,
+    #     ]))
+
+    #     candidate_paths = []
+    #     for suffix in self.MASK_SUFFIXES:
+    #         for ext in ext_candidates:
+    #             candidate_paths.append(os.path.join(image_dir, f'{image_stem}{suffix}{ext}'))
+
+    #     parent_dir = os.path.dirname(image_dir)
+    #     for folder_name in self.MASK_DIR_NAMES:
+    #         mask_dir = os.path.join(image_dir, folder_name)
+    #         parent_mask_dir = os.path.join(parent_dir, folder_name)
+    #         for ext in ext_candidates:
+    #             candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{ext}'))
+    #             candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{ext}'))
+    #             for suffix in self.MASK_SUFFIXES:
+    #                 candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{suffix}{ext}'))
+    #                 candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{suffix}{ext}'))
+
+    #     for candidate_path in candidate_paths:
+    #         if os.path.isfile(candidate_path):
+    #             return candidate_path
+    #     return None
+    
     def _resolve_mask_path(self, image_path):
+        """返回一个包含所有匹配 mask 路径的列表"""
         image_dir = os.path.dirname(image_path)
         image_stem = os.path.splitext(os.path.basename(image_path))[0]
-        ext_candidates = list(dict.fromkeys([
-            os.path.splitext(image_path)[1].lower(),
-            *self.IMAGE_EXTENSIONS,
-        ]))
+        
+        # 匹配该原图对应的所有 mask，例如 benign (4)_mask.png, benign (4)_mask_1.png
+        # 这种写法不仅兼容 BUSI 原版命名，也兼容很多其他变体
+        search_pattern = os.path.join(image_dir, f"{image_stem}*mask*.*")
+        mask_candidates = glob.glob(search_pattern)
+        
+        # 过滤掉非图像文件，并确保不把原图自己加进去
+        valid_mask_paths = [p for p in mask_candidates if self._is_image_file(p) and p != image_path]
+        
+        return valid_mask_paths if valid_mask_paths else None
 
-        candidate_paths = []
-        for suffix in self.MASK_SUFFIXES:
-            for ext in ext_candidates:
-                candidate_paths.append(os.path.join(image_dir, f'{image_stem}{suffix}{ext}'))
-
-        parent_dir = os.path.dirname(image_dir)
-        for folder_name in self.MASK_DIR_NAMES:
-            mask_dir = os.path.join(image_dir, folder_name)
-            parent_mask_dir = os.path.join(parent_dir, folder_name)
-            for ext in ext_candidates:
-                candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{ext}'))
-                candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{ext}'))
-                for suffix in self.MASK_SUFFIXES:
-                    candidate_paths.append(os.path.join(mask_dir, f'{image_stem}{suffix}{ext}'))
-                    candidate_paths.append(os.path.join(parent_mask_dir, f'{image_stem}{suffix}{ext}'))
-
-        for candidate_path in candidate_paths:
-            if os.path.isfile(candidate_path):
-                return candidate_path
-        return None
-
-    def _make_record(self, image_path, mask_path=None):
+    # def _make_record(self, image_path, mask_path=None):
+    #     image_path = os.path.abspath(image_path)
+    #     return {
+    #         'image_path': image_path,
+    #         'mask_path': os.path.abspath(mask_path) if mask_path is not None else None,
+    #         'rel_path': self._canonical_relpath(os.path.relpath(image_path, self.root_path)),
+    #         'stem': os.path.splitext(os.path.basename(image_path))[0],
+    #     }
+    
+    def _make_record(self, image_path, mask_paths=None):
         image_path = os.path.abspath(image_path)
         return {
             'image_path': image_path,
-            'mask_path': os.path.abspath(mask_path) if mask_path is not None else None,
+            'mask_path': [os.path.abspath(p) for p in mask_paths] if mask_paths else None,
             'rel_path': self._canonical_relpath(os.path.relpath(image_path, self.root_path)),
             'stem': os.path.splitext(os.path.basename(image_path))[0],
         }
@@ -760,13 +784,26 @@ class BUSISemiDataset(Dataset):
     def _load_image(self, image_path):
         return Image.open(image_path).convert('RGB')
 
-    def _load_mask(self, mask_path):
-        if mask_path is None:
-            raise FileNotFoundError('BUSI labeled sample requires a valid mask path')
-        mask = np.asarray(Image.open(mask_path).convert('L'), dtype=np.uint8)
-        if mask.max() > 1:
-            mask = (mask > 0).astype(np.uint8)
-        return Image.fromarray(mask)
+    def _load_mask(self, mask_paths):
+        if not mask_paths:
+            raise FileNotFoundError('BUSI labeled sample requires at least one valid mask path')
+        
+        combined_mask = None
+        
+        # 遍历读取该原图对应的所有 mask
+        for path in mask_paths:
+            mask = np.asarray(Image.open(path).convert('L'), dtype=np.uint8)
+            # 二值化规范
+            if mask.max() > 1:
+                mask = (mask > 0).astype(np.uint8)
+                
+            # 将多张 mask 按位或 (逻辑融合)
+            if combined_mask is None:
+                combined_mask = mask
+            else:
+                combined_mask = np.maximum(combined_mask, mask)
+                
+        return Image.fromarray(combined_mask)
 
     def _apply_train_aug(self, image, mask, ignore_value):
         if self.ratio_range is not None:
