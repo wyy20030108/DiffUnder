@@ -753,6 +753,13 @@ class BUSISemiDataset(Dataset):
         with Image.open(image_path) as img:
             return img.convert('RGB')
 
+    def _normalize_real_mask(self, mask):
+        mask = np.asarray(mask, dtype=np.uint8).copy()
+        mask[mask == 255] = 1
+        if mask.max() > 1:
+            mask = (mask > 0).astype(np.uint8)
+        return mask
+
     def _load_mask(self, mask_paths):
         if not mask_paths:
             raise FileNotFoundError('BUSI labeled sample requires at least one valid mask path')
@@ -761,10 +768,8 @@ class BUSISemiDataset(Dataset):
         
         # 遍历读取该原图对应的所有 mask
         for path in mask_paths:
-            mask = np.asarray(Image.open(path).convert('L'), dtype=np.uint8)
-            # 二值化规范
-            if mask.max() > 1:
-                mask = (mask > 0).astype(np.uint8)
+            with Image.open(path) as mask_img:
+                mask = self._normalize_real_mask(mask_img.convert('L'))
                 
             # 将多张 mask 按位或 (逻辑融合)
             if combined_mask is None:

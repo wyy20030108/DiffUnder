@@ -72,6 +72,8 @@ CLASSES = {'pascal': ['background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bot
 
             'ACDC': ['RV', 'Myo', 'LV'],
             'ACDC_All': ['background', 'RV', 'Myo', 'LV'],
+            'BUSI_All': ['background', 'Rumor'],
+            'BUSI': ['Rumor'],
 
 
             }
