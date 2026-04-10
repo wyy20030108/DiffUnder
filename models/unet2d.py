@@ -221,12 +221,20 @@ class UNet(nn.Module):
         )
         self.corr = Corr(in_channels=params['feature_chns'][0], nclass=class_num)
 
+    def _build_fp_features(self, feature):
+        fp_features = []
+        key_feature_indices = {0, len(feature) - 1}
+        for idx, feat in enumerate(feature):
+            fp_feat = nn.Dropout2d(0.5)(feat) if idx in key_feature_indices else feat
+            fp_features.append(torch.cat((feat, fp_feat), dim=0))
+        return fp_features
+
     def forward(self, x, need_fp=False, use_corr=False, use_feature=False):
         feature = self.encoder(x)
         dict_return = {}
 
         if need_fp:
-            decoder_feature = self.decoder([torch.cat((feat, nn.Dropout2d(0.5)(feat))) for feat in feature])
+            decoder_feature = self.decoder(self._build_fp_features(feature))
             outs = self.classifier(decoder_feature)
             out, out_fp = outs.chunk(2)
             if use_corr:
