@@ -1,8 +1,8 @@
 #!/bin/bash
-GPUID=7
+GPUID=0
 
-CUDA_VISIBLE_DEVICES=$GPUID python c_busi/corrmatch.py \
- --cli_dataset "8busi" \
- --seed 2027 \
- --exp "CorrMatch" \
+CUDA_VISIBLE_DEVICES=$GPUID python c_busi/abd.py \
+ --cli_dataset "32busi" \
+ --seed 2026 \
+ --exp "ABD" \
  --device "cuda:$GPUID"
