@@ -1,8 +1,8 @@
 #!/bin/bash
-GPUID=7
+GPUID=6
 
 CUDA_VISIBLE_DEVICES=$GPUID python c_busi/crossmatch.py \
- --cli_dataset "16busi" \
- --seed 2025 \
+ --cli_dataset "32busi" \
+ --seed 2027 \
  --exp "CrossMatch" \
  --device "cuda:$GPUID"
