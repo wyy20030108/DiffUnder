@@ -13,7 +13,7 @@ sys.path.append(project_root)
 from Datasets.efficient import BUSISemiDataset
 from models.unet2d import UNet
 from utils.classes import CLASSES
-
+# - 左侧：GT - 右侧：预测 Pred
 
 def get_parser():
     parser = argparse.ArgumentParser(description='BUSI test script')
@@ -29,8 +29,7 @@ def get_parser():
     parser.add_argument('--nclass', type=int, default=2)
     parser.add_argument('--crop_size', type=int, default=256)
     parser.add_argument('--strict_eval_masks', action='store_true', default=False)
-    parser.add_argument('--save_pred_root', type=str, default=None)
-    parser.add_argument('--overlay_alpha', type=float, default=0.5)
+    parser.add_argument('--save_pred_root', type=str, default='/data/lhy_data/checkpoints_wyy/test')
     return parser
 
 
@@ -155,37 +154,47 @@ def build_output_paths(sample_record, save_pred_root):
     rel_path = sample_record.get('rel_path') or os.path.basename(sample_record['image_path'])
     rel_root, _ = os.path.splitext(rel_path)
     mask_path = os.path.join(save_pred_root, 'masks', rel_root + '.png')
-    overlay_path = os.path.join(save_pred_root, 'overlays', rel_root + '.png')
-    return mask_path, overlay_path
+    compare_path = os.path.join(save_pred_root, 'comparisons', rel_root + '.png')
+    return mask_path, compare_path
 
 
-def save_prediction_visuals(sample_record, pred, args, cfg):
+def colorize_mask(mask, cfg):
+    palette = build_overlay_palette()
+    color_mask = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+    for class_idx in range(1, cfg['nclass']):
+        class_mask = mask == class_idx
+        if not np.any(class_mask):
+            continue
+        color_mask[class_mask] = palette[(class_idx - 1) % len(palette)]
+    return color_mask
+
+
+def save_prediction_visuals(sample_record, pred, gt, args, cfg):
     if not args.save_pred_root:
         return
-    mask_path, overlay_path = build_output_paths(sample_record, args.save_pred_root)
+    mask_path, compare_path = build_output_paths(sample_record, args.save_pred_root)
     os.makedirs(os.path.dirname(mask_path), exist_ok=True)
-    os.makedirs(os.path.dirname(overlay_path), exist_ok=True)
-
-    visual_mask = build_visual_mask(pred, cfg)
-    Image.fromarray(visual_mask).save(mask_path)
+    os.makedirs(os.path.dirname(compare_path), exist_ok=True)
 
     with Image.open(sample_record['image_path']) as image:
         base_image = image.convert('RGB')
     target_size = (pred.shape[1], pred.shape[0])
     if base_image.size != target_size:
         base_image = base_image.resize(target_size, Image.BILINEAR)
+    pred_overlay = np.asarray(base_image, dtype=np.float32)
+    pred_color = colorize_mask(pred.astype(np.uint8), cfg).astype(np.float32)
+    pred_foreground = pred > 0
+    pred_overlay[pred_foreground] = 0.5 * pred_overlay[pred_foreground] + 0.5 * pred_color[pred_foreground]
+    image_array = np.asarray(base_image, dtype=np.uint8)
+    pred_overlay = np.clip(pred_overlay, 0, 255).astype(np.uint8)
+    spacer = np.full((pred.shape[0], 8, 3), 255, dtype=np.uint8)
+    mask_image = np.concatenate([image_array, spacer, pred_overlay], axis=1)
+    Image.fromarray(mask_image).save(mask_path)
 
-    base_array = np.asarray(base_image, dtype=np.float32)
-    overlay_array = base_array.copy()
-    palette = build_overlay_palette()
-    alpha = float(np.clip(args.overlay_alpha, 0.0, 1.0))
-    for class_idx in range(1, cfg['nclass']):
-        class_mask = pred == class_idx
-        if not np.any(class_mask):
-            continue
-        color = palette[(class_idx - 1) % len(palette)].astype(np.float32)
-        overlay_array[class_mask] = (1.0 - alpha) * overlay_array[class_mask] + alpha * color
-    Image.fromarray(np.clip(overlay_array, 0, 255).astype(np.uint8)).save(overlay_path)
+    gt_color = colorize_mask(gt.astype(np.uint8), cfg)
+    pred_color = pred_color.astype(np.uint8)
+    compare_image = np.concatenate([gt_color, spacer, pred_color], axis=1)
+    Image.fromarray(compare_image).save(compare_path)
 
 
 def test_busi(args, cfg):
@@ -238,7 +247,7 @@ def test_busi(args, cfg):
         total_metrics += sample_metrics
         sample_count += 1
         if args.save_pred_root:
-            save_prediction_visuals(sample_record, pred, args, cfg)
+            save_prediction_visuals(sample_record, pred, label, args, cfg)
             saved_visual_count += 1
 
     if sample_count == 0:
@@ -265,7 +274,7 @@ def test_busi(args, cfg):
         )
     )
     if args.save_pred_root:
-        print(f'Saved {saved_visual_count} prediction masks and overlays to {args.save_pred_root}')
+        print(f'Saved {saved_visual_count} prediction-overlay images and comparison images to {args.save_pred_root}')
     return avg_metrics, mean_metrics
 
 
