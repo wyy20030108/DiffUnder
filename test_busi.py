@@ -5,6 +5,7 @@ import argparse
 import numpy as np
 import torch.nn.functional as F
 from medpy import metric
+from PIL import Image
 from tqdm import tqdm
 
 project_root = os.path.abspath(os.path.dirname(__file__))
@@ -28,6 +29,8 @@ def get_parser():
     parser.add_argument('--nclass', type=int, default=2)
     parser.add_argument('--crop_size', type=int, default=256)
     parser.add_argument('--strict_eval_masks', action='store_true', default=False)
+    parser.add_argument('--save_pred_root', type=str, default=None)
+    parser.add_argument('--overlay_alpha', type=float, default=0.5)
     return parser
 
 
@@ -73,9 +76,9 @@ def resolve_state_dict(checkpoint, use_ema=False):
     if not isinstance(checkpoint, dict):
         return checkpoint
     if use_ema:
-        preferred_keys = ['model_ema', 'ema', 'teacher', 'model2', 'model', 'state_dict', 'student', 'net']
+        preferred_keys = ['model_ema', 'ema', 'teacher', 'model2', 'model', 'state_dict', 'student', 'net', 'teacher_model']
     else:
-        preferred_keys = ['model', 'model1', 'state_dict', 'student', 'net', 'model_ema', 'ema', 'teacher', 'model2']
+        preferred_keys = ['model', 'model1', 'state_dict', 'student', 'net', 'model_ema', 'ema', 'teacher', 'model2', 'student_model']
     for key in preferred_keys:
         value = checkpoint.get(key)
         if isinstance(value, dict):
@@ -126,12 +129,72 @@ def get_class_names(cfg):
     return class_names[:cfg['nclass'] - 1]
 
 
+def build_overlay_palette():
+    return np.asarray(
+        [
+            [255, 64, 64],
+            [64, 200, 255],
+            [255, 196, 64],
+            [128, 255, 128],
+            [255, 128, 255],
+            [128, 128, 255],
+        ],
+        dtype=np.uint8,
+    )
+
+
+def build_visual_mask(pred, cfg):
+    pred = pred.astype(np.uint8)
+    if cfg['nclass'] <= 2:
+        return (pred > 0).astype(np.uint8) * 255
+    scale = 255.0 / max(1, cfg['nclass'] - 1)
+    return np.clip(pred.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+
+
+def build_output_paths(sample_record, save_pred_root):
+    rel_path = sample_record.get('rel_path') or os.path.basename(sample_record['image_path'])
+    rel_root, _ = os.path.splitext(rel_path)
+    mask_path = os.path.join(save_pred_root, 'masks', rel_root + '.png')
+    overlay_path = os.path.join(save_pred_root, 'overlays', rel_root + '.png')
+    return mask_path, overlay_path
+
+
+def save_prediction_visuals(sample_record, pred, args, cfg):
+    if not args.save_pred_root:
+        return
+    mask_path, overlay_path = build_output_paths(sample_record, args.save_pred_root)
+    os.makedirs(os.path.dirname(mask_path), exist_ok=True)
+    os.makedirs(os.path.dirname(overlay_path), exist_ok=True)
+
+    visual_mask = build_visual_mask(pred, cfg)
+    Image.fromarray(visual_mask).save(mask_path)
+
+    with Image.open(sample_record['image_path']) as image:
+        base_image = image.convert('RGB')
+    target_size = (pred.shape[1], pred.shape[0])
+    if base_image.size != target_size:
+        base_image = base_image.resize(target_size, Image.BILINEAR)
+
+    base_array = np.asarray(base_image, dtype=np.float32)
+    overlay_array = base_array.copy()
+    palette = build_overlay_palette()
+    alpha = float(np.clip(args.overlay_alpha, 0.0, 1.0))
+    for class_idx in range(1, cfg['nclass']):
+        class_mask = pred == class_idx
+        if not np.any(class_mask):
+            continue
+        color = palette[(class_idx - 1) % len(palette)].astype(np.float32)
+        overlay_array[class_mask] = (1.0 - alpha) * overlay_array[class_mask] + alpha * color
+    Image.fromarray(np.clip(overlay_array, 0, 255).astype(np.uint8)).save(overlay_path)
+
+
 def test_busi(args, cfg):
     dataset = BUSISemiDataset(args.split, args, cfg.get('crop_size'))
     model = load_model(args, cfg)
     class_names = get_class_names(cfg)
     total_metrics = np.zeros((cfg['nclass'] - 1, 4), dtype=np.float64)
     sample_count = 0
+    saved_visual_count = 0
     valid_indices = []
     missing_indices = []
     for idx, sample in enumerate(dataset.name_list):
@@ -149,9 +212,12 @@ def test_busi(args, cfg):
             raise FileNotFoundError('Found samples without mask while strict_eval_masks is enabled.')
     if not valid_indices:
         raise RuntimeError(f'No valid labeled samples found for split {args.split}.')
+    if args.save_pred_root:
+        os.makedirs(args.save_pred_root, exist_ok=True)
 
     eval_size = normalize_eval_size(cfg.get('crop_size'))
     for idx in tqdm(valid_indices, ncols=100):
+        sample_record = dataset.name_list[idx]
         image, label = dataset[idx]
         image = image.unsqueeze(0).cuda()
         label = label.numpy().astype(np.uint8)
@@ -171,6 +237,9 @@ def test_busi(args, cfg):
         sample_metrics = np.asarray(sample_metrics, dtype=np.float64)
         total_metrics += sample_metrics
         sample_count += 1
+        if args.save_pred_root:
+            save_prediction_visuals(sample_record, pred, args, cfg)
+            saved_visual_count += 1
 
     if sample_count == 0:
         raise RuntimeError(f'No samples found for split {args.split}')
@@ -195,6 +264,8 @@ def test_busi(args, cfg):
             mean_metrics[0], mean_metrics[1], mean_metrics[2], mean_metrics[3]
         )
     )
+    if args.save_pred_root:
+        print(f'Saved {saved_visual_count} prediction masks and overlays to {args.save_pred_root}')
     return avg_metrics, mean_metrics
 
 
