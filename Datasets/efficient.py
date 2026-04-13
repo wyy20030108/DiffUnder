@@ -212,10 +212,11 @@ class ACDCsemiDataset(Dataset):
             return int(size_value[0])
         return int(size_value)
 
-    def _apply_train_aug(self, image, mask, ignore_value):
+    def _apply_train_aug(self, image, mask, _ignore_value):
         crop_size = self._normalize_size()
         if crop_size is not None:
-            image, mask = crop(image, mask, crop_size, ignore_value=ignore_value)
+            image = image.resize((crop_size, crop_size), Image.BILINEAR)
+            mask = mask.resize((crop_size, crop_size), Image.NEAREST)
         image, mask = hflip(image, mask)
         return image, mask
 

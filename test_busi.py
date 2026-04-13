@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 import torch.nn.functional as F
 from medpy import metric
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 
 project_root = os.path.abspath(os.path.dirname(__file__))
@@ -13,7 +13,6 @@ sys.path.append(project_root)
 from Datasets.efficient import BUSISemiDataset
 from models.unet2d import UNet
 from utils.classes import CLASSES
-# - 左侧：GT - 右侧：预测 Pred
 
 def get_parser():
     parser = argparse.ArgumentParser(description='BUSI test script')
@@ -142,20 +141,11 @@ def build_overlay_palette():
     )
 
 
-def build_visual_mask(pred, cfg):
-    pred = pred.astype(np.uint8)
-    if cfg['nclass'] <= 2:
-        return (pred > 0).astype(np.uint8) * 255
-    scale = 255.0 / max(1, cfg['nclass'] - 1)
-    return np.clip(pred.astype(np.float32) * scale, 0, 255).astype(np.uint8)
-
-
 def build_output_paths(sample_record, save_pred_root):
     rel_path = sample_record.get('rel_path') or os.path.basename(sample_record['image_path'])
     rel_root, _ = os.path.splitext(rel_path)
-    mask_path = os.path.join(save_pred_root, 'masks', rel_root + '.png')
-    compare_path = os.path.join(save_pred_root, 'comparisons', rel_root + '.png')
-    return mask_path, compare_path
+    visual_path = os.path.join(save_pred_root, 'visuals', rel_root + '.png')
+    return visual_path
 
 
 def colorize_mask(mask, cfg):
@@ -169,32 +159,53 @@ def colorize_mask(mask, cfg):
     return color_mask
 
 
+def add_title_bar(panels, titles, spacer_width=8, title_height=28):
+    panel_width = panels[0].shape[1]
+    canvas_width = panel_width * len(panels) + spacer_width * (len(panels) - 1)
+    title_bar = Image.new('RGB', (canvas_width, title_height), color=(255, 255, 255))
+    draw = ImageDraw.Draw(title_bar)
+    font = ImageFont.load_default()
+    for idx, title in enumerate(titles):
+        x0 = idx * (panel_width + spacer_width)
+        text_bbox = draw.textbbox((0, 0), title, font=font)
+        text_w = text_bbox[2] - text_bbox[0]
+        text_h = text_bbox[3] - text_bbox[1]
+        text_x = x0 + max(0, (panel_width - text_w) // 2)
+        text_y = max(0, (title_height - text_h) // 2 - text_bbox[1])
+        draw.text((text_x, text_y), title, fill=(0, 0, 0), font=font)
+    return np.asarray(title_bar, dtype=np.uint8)
+
+
 def save_prediction_visuals(sample_record, pred, gt, args, cfg):
     if not args.save_pred_root:
         return
-    mask_path, compare_path = build_output_paths(sample_record, args.save_pred_root)
-    os.makedirs(os.path.dirname(mask_path), exist_ok=True)
-    os.makedirs(os.path.dirname(compare_path), exist_ok=True)
+    visual_path = build_output_paths(sample_record, args.save_pred_root)
+    os.makedirs(os.path.dirname(visual_path), exist_ok=True)
 
     with Image.open(sample_record['image_path']) as image:
         base_image = image.convert('RGB')
     target_size = (pred.shape[1], pred.shape[0])
     if base_image.size != target_size:
         base_image = base_image.resize(target_size, Image.BILINEAR)
-    pred_overlay = np.asarray(base_image, dtype=np.float32)
+
+    image_array = np.asarray(base_image, dtype=np.uint8)
+    pred_overlay = image_array.astype(np.float32)
     pred_color = colorize_mask(pred.astype(np.uint8), cfg).astype(np.float32)
     pred_foreground = pred > 0
     pred_overlay[pred_foreground] = 0.5 * pred_overlay[pred_foreground] + 0.5 * pred_color[pred_foreground]
-    image_array = np.asarray(base_image, dtype=np.uint8)
     pred_overlay = np.clip(pred_overlay, 0, 255).astype(np.uint8)
-    spacer = np.full((pred.shape[0], 8, 3), 255, dtype=np.uint8)
-    mask_image = np.concatenate([image_array, spacer, pred_overlay], axis=1)
-    Image.fromarray(mask_image).save(mask_path)
 
-    gt_color = colorize_mask(gt.astype(np.uint8), cfg)
-    pred_color = pred_color.astype(np.uint8)
-    compare_image = np.concatenate([gt_color, spacer, pred_color], axis=1)
-    Image.fromarray(compare_image).save(compare_path)
+    gt_overlay = image_array.astype(np.float32)
+    gt_color = colorize_mask(gt.astype(np.uint8), cfg).astype(np.float32)
+    gt_foreground = gt > 0
+    gt_overlay[gt_foreground] = 0.5 * gt_overlay[gt_foreground] + 0.5 * gt_color[gt_foreground]
+    gt_overlay = np.clip(gt_overlay, 0, 255).astype(np.uint8)
+
+    spacer = np.full((pred.shape[0], 8, 3), 255, dtype=np.uint8)
+    merged_body = np.concatenate([image_array, spacer, pred_overlay, spacer, gt_overlay], axis=1)
+    title_bar = add_title_bar([image_array, pred_overlay, gt_overlay], ['Img', 'Img+Pred', 'Img+GT'])
+    merged_image = np.concatenate([title_bar, merged_body], axis=0)
+    Image.fromarray(merged_image).save(visual_path)
 
 
 def test_busi(args, cfg):
@@ -274,7 +285,7 @@ def test_busi(args, cfg):
         )
     )
     if args.save_pred_root:
-        print(f'Saved {saved_visual_count} prediction-overlay images and comparison images to {args.save_pred_root}')
+        print(f'Saved {saved_visual_count} merged visualization images to {args.save_pred_root}')
     return avg_metrics, mean_metrics
 
 
