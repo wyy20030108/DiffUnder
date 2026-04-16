@@ -1,5 +1,5 @@
 #!/bin/bash
-GPUID=3
+GPUID=0
 
 CUDA_VISIBLE_DEVICES=$GPUID python c_busi/jepa_ours.py \
  --cli_dataset "8busi" \
