@@ -7,6 +7,7 @@ import shutil
 import random
 import logging
 import pprint
+from copy import deepcopy
 import torch
 import sys
 import argparse
@@ -42,8 +43,9 @@ DEFAULT_BUSI_CFG = {
     'crop_size': 256,
     'conf_thresh': 0.95,
     'sup_weight': 1.0,
-    'ot_weight': 0.5,
-    'mask_ratio': 0.5,
+    'consistency_weight': 0.5,
+    'consistency_mode': 'l2',
+    'mask_ratio': 0.2,
     'mask_block_size': 32,
     'feature_dim': 64,
     'transformer_dim': 128,
@@ -113,6 +115,8 @@ def load_cfg(args, defaults):
         with open(args.config, 'r') as f:
             cfg.update(yaml.load(f, Loader=yaml.Loader))
     cfg['dataset'] = args.dataset
+    cfg.setdefault('consistency_weight', cfg.get('ot_weight', DEFAULT_BUSI_CFG['consistency_weight']))
+    cfg.setdefault('consistency_mode', DEFAULT_BUSI_CFG['consistency_mode'])
     return cfg
 
 
@@ -125,14 +129,23 @@ def build_class_names(cfg):
     return class_names[:cfg['nclass'] - 1]
 
 
-def generate_2d_mask(feature, mask_ratio=0.5, min_block_size=16, max_block_size=None):
+def build_saliency_map(image):
+    gray = image.float().mean(dim=1, keepdim=True)
+    smooth = F.avg_pool2d(gray, kernel_size=7, stride=1, padding=3)
+    saliency = (gray - smooth).abs()
+    saliency = saliency / saliency.amax(dim=(2, 3), keepdim=True).clamp_min(1e-6)
+    return saliency
+
+
+def generate_2d_mask(feature, mask_ratio=0.2, min_block_size=16, max_block_size=None, saliency_map=None):
     b, _, h, w = feature.shape
     device = feature.device
     context_mask = torch.ones((b, 1, h, w), device=device, dtype=feature.dtype)
     target_mask = torch.zeros_like(context_mask)
     total_pixels = h * w
+    mask_ratio = float(np.clip(mask_ratio, 0.0, 0.35))
     target_pixels = max(1, int(total_pixels * mask_ratio))
-    max_block_size = max_block_size or max(min_block_size, min(h, w) // 2)
+    max_block_size = max_block_size or max(min_block_size, min(h, w) // 4)
     max_block_size = max(1, min(max_block_size, min(h, w)))
     min_block_size = max(1, min(min_block_size, max_block_size))
 
@@ -140,10 +153,20 @@ def generate_2d_mask(feature, mask_ratio=0.5, min_block_size=16, max_block_size=
         masked_pixels = 0
         attempts = 0
         while masked_pixels < target_pixels and attempts < 64:
-            block_h = random.randint(min_block_size, max_block_size)
-            block_w = random.randint(min_block_size, max_block_size)
-            top = random.randint(0, max(h - block_h, 0))
-            left = random.randint(0, max(w - block_w, 0))
+            candidate_region = None
+            candidate_score = None
+            for _ in range(4):
+                block_h = random.randint(min_block_size, max_block_size)
+                block_w = random.randint(min_block_size, max_block_size)
+                top = random.randint(0, max(h - block_h, 0))
+                left = random.randint(0, max(w - block_w, 0))
+                score = 0.0
+                if saliency_map is not None:
+                    score = saliency_map[idx, :, top:top + block_h, left:left + block_w].mean().item()
+                if candidate_region is None or score < candidate_score:
+                    candidate_region = (top, left, block_h, block_w)
+                    candidate_score = score
+            top, left, block_h, block_w = candidate_region
             region = context_mask[idx, :, top:top + block_h, left:left + block_w]
             newly_masked = region.sum().item()
             region.zero_()
@@ -326,26 +349,40 @@ def compute_supervised_loss(logits, target, criterion_ce, criterion_dice):
     return (loss_ce + loss_dice) / 2.0
 
 
-def compute_bidirectional_ot_loss(model_context, model_target, predictor, context_input, target_input, target_mask, ot_loss):
-    _, context_feature = model_context(context_input, return_feature=True)
-    _, target_feature = model_target(target_input, return_feature=True)
-    target_mask = F.interpolate(target_mask.float(), size=target_feature.shape[-2:], mode='nearest')
-    predicted_target = predictor(context_feature)
-    return ot_loss(predicted_target, target_feature.detach(), target_mask=target_mask)
+def set_requires_grad(model, requires_grad):
+    for param in model.parameters():
+        param.requires_grad_(requires_grad)
+
+
+def compute_pixel_consistency_loss(student_map, teacher_map, target_mask=None, mode='l2'):
+    teacher_map = teacher_map.detach()
+    if mode == 'kl':
+        loss_map = F.kl_div(
+            F.log_softmax(student_map, dim=1),
+            F.softmax(teacher_map, dim=1),
+            reduction='none',
+        ).sum(dim=1, keepdim=True)
+    else:
+        loss_map = (student_map - teacher_map).pow(2).mean(dim=1, keepdim=True)
+
+    if target_mask is not None:
+        target_mask = F.interpolate(target_mask.float(), size=loss_map.shape[-2:], mode='nearest')
+        denom = target_mask.sum().clamp_min(1.0)
+        return (loss_map * target_mask).sum() / denom
+    return loss_map.mean()
 
 
 def train_step(
     labeled_data,
     unlabeled_data,
-    model_a,
-    model_b,
-    predictor_a2b,
-    predictor_b2a,
+    student_model,
+    teacher_model,
     optimizer,
     criterion_ce,
     criterion_dice,
-    ot_loss,
     cfg,
+    ema_decay,
+    global_step,
 ):
     img_x, mask_x = labeled_data
     img_x = img_x.cuda(non_blocking=True)
@@ -355,16 +392,15 @@ def train_step(
     img_s = img_s.cuda(non_blocking=True)
     ignore_mask = ignore_mask.cuda(non_blocking=True)
 
-    logits_a = model_a(img_x)
-    logits_b = model_b(img_x)
-    loss_sup_a = compute_supervised_loss(logits_a, mask_x, criterion_ce, criterion_dice)
-    loss_sup_b = compute_supervised_loss(logits_b, mask_x, criterion_ce, criterion_dice)
-    loss_sup = 0.5 * (loss_sup_a + loss_sup_b)
+    student_logits = student_model(img_x)
+    loss_sup = compute_supervised_loss(student_logits, mask_x, criterion_ce, criterion_dice)
 
+    saliency_map = build_saliency_map(img_s)
     context_mask, target_mask = generate_2d_mask(
-        img_w,
+        img_s,
         mask_ratio=cfg['mask_ratio'],
         min_block_size=cfg['mask_block_size'],
+        saliency_map=saliency_map,
     )
     valid_mask = (ignore_mask != 255).unsqueeze(1).float()
     context_mask = context_mask * valid_mask
@@ -373,46 +409,45 @@ def train_step(
     target_mask = target_mask + fallback_mask * valid_mask
     target_mask = (target_mask > 0).float()
 
-    loss_ot_a2b = compute_bidirectional_ot_loss(
-        model_context=model_a,
-        model_target=model_b,
-        predictor=predictor_a2b,
-        context_input=img_w * context_mask,
-        target_input=img_s * target_mask,
+    student_context = img_s * context_mask
+    student_unlabeled_logits, student_unlabeled_feature = student_model(student_context, return_feature=True)
+    with torch.no_grad():
+        teacher_model.eval()
+        teacher_unlabeled_logits, teacher_unlabeled_feature = teacher_model(img_w, return_feature=True)
+
+    loss_feature = compute_pixel_consistency_loss(
+        student_unlabeled_feature,
+        teacher_unlabeled_feature,
         target_mask=target_mask,
-        ot_loss=ot_loss,
+        mode=cfg['consistency_mode'],
     )
-    loss_ot_b2a = compute_bidirectional_ot_loss(
-        model_context=model_b,
-        model_target=model_a,
-        predictor=predictor_b2a,
-        context_input=img_s * context_mask,
-        target_input=img_w * target_mask,
+    loss_logits = compute_pixel_consistency_loss(
+        student_unlabeled_logits,
+        teacher_unlabeled_logits,
         target_mask=target_mask,
-        ot_loss=ot_loss,
+        mode='kl',
     )
-    loss_ot = 0.5 * (loss_ot_a2b + loss_ot_b2a)
-    loss = cfg['sup_weight'] * loss_sup + cfg['ot_weight'] * loss_ot
+    loss_consistency = loss_feature + 0.25 * loss_logits
+    loss = cfg['sup_weight'] * loss_sup + cfg['consistency_weight'] * loss_consistency
 
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+    update_ema_variables(student_model, teacher_model, ema_decay, global_step)
 
     with torch.no_grad():
-        unlabeled_fg_a = (model_a(img_w).argmax(dim=1) > 0).float().mean()
-        unlabeled_fg_b = (model_b(img_s).argmax(dim=1) > 0).float().mean()
+        teacher_fg = (teacher_unlabeled_logits.argmax(dim=1) > 0).float().mean()
+        student_fg = (student_unlabeled_logits.argmax(dim=1) > 0).float().mean()
 
     return {
         'loss': loss.detach(),
         'loss_sup': loss_sup.detach(),
-        'loss_sup_a': loss_sup_a.detach(),
-        'loss_sup_b': loss_sup_b.detach(),
-        'loss_ot': loss_ot.detach(),
-        'loss_ot_a2b': loss_ot_a2b.detach(),
-        'loss_ot_b2a': loss_ot_b2a.detach(),
+        'loss_consistency': loss_consistency.detach(),
+        'loss_feature': loss_feature.detach(),
+        'loss_logits': loss_logits.detach(),
         'mask_ratio': target_mask.mean().detach(),
-        'pseudo_fg_a': unlabeled_fg_a.detach(),
-        'pseudo_fg_b': unlabeled_fg_b.detach(),
+        'pseudo_fg_student': student_fg.detach(),
+        'pseudo_fg_teacher': teacher_fg.detach(),
     }
 
 
@@ -423,38 +458,25 @@ def main(args, cfg, save_path, cp_path):
     logger.info('{}\n'.format(pprint.pformat(all_args)))
     writer = SummaryWriter(save_path)
 
-    model_a = init_2d_weight(UNetFeatureBranch(in_chns=3, class_num=cfg['nclass'], feature_dim=cfg['feature_dim']).cuda()).cuda()
-    model_b = init_2d_weight(
-        TransformerSegBranch(
-            in_chns=3,
-            class_num=cfg['nclass'],
-            feature_dim=cfg['feature_dim'],
-            embed_dim=cfg['transformer_dim'],
-            depth=cfg['transformer_depth'],
-            num_heads=cfg['transformer_heads'],
-        ).cuda()
+    student_model = init_2d_weight(
+        UNetFeatureBranch(in_chns=3, class_num=cfg['nclass'], feature_dim=cfg['feature_dim']).cuda()
     ).cuda()
-    predictor_a2b = init_2d_weight(DecoupledPredictor(cfg['feature_dim']).cuda()).cuda()
-    predictor_b2a = init_2d_weight(DecoupledPredictor(cfg['feature_dim']).cuda()).cuda()
+    teacher_model = deepcopy(student_model).cuda()
+    set_requires_grad(teacher_model, False)
+    teacher_model.eval()
 
     optimizer = AdamW(
-        params=list(model_a.parameters()) + list(model_b.parameters()) + list(predictor_a2b.parameters()) + list(predictor_b2a.parameters()),
+        params=student_model.parameters(),
         lr=cfg['lr'],
         betas=(0.9, 0.999),
         weight_decay=0.01,
     )
     criterion_l = nn.CrossEntropyLoss(ignore_index=255).cuda()
     diceloss = DiceLoss(cfg['nclass']).cuda()
-    ot_loss = SinkhornOTLoss(
-        epsilon=cfg['sinkhorn_eps'],
-        max_iter=cfg['sinkhorn_iters'],
-        max_tokens=cfg['sinkhorn_max_tokens'],
-    ).cuda()
 
     logger.info('use {} gpus!'.format(torch.cuda.device_count()))
-    logger.info('UNet branch params: {:.3f}M'.format(count_params(model_a)))
-    logger.info('Transformer branch params: {:.3f}M'.format(count_params(model_b)))
-    logger.info('Predictor params: {:.3f}M'.format(count_params(predictor_a2b) + count_params(predictor_b2a)))
+    logger.info('Student params: {:.3f}M'.format(count_params(student_model)))
+    logger.info('Teacher params: {:.3f}M'.format(count_params(teacher_model)))
 
     trainset_u = BUSISemiDataset('train_u', args, cfg['crop_size'])
     trainset_l = BUSISemiDataset('train_l', args, cfg['crop_size'])
@@ -485,72 +507,73 @@ def main(args, cfg, save_path, cp_path):
     logger.info('Total iters: %d', total_iters)
     class_names = build_class_names(cfg)
     log_interval = max(len(trainloader) // 8, 1)
-    best_dice_a = 0.0
-    best_dice_b = 0.0
-    best_epoch_a = 0
-    best_epoch_b = 0
+    best_dice_student = 0.0
+    best_dice_teacher = 0.0
+    best_epoch_student = 0
+    best_epoch_teacher = 0
     epoch = -1
     iter_num = 0
     latest_path = os.path.join(cp_path, 'latest.pth')
 
     if os.path.exists(latest_path):
         checkpoint = torch.load(latest_path, weights_only=False)
-        model_a.load_state_dict(checkpoint['model_a'])
-        model_b.load_state_dict(checkpoint['model_b'])
-        predictor_a2b.load_state_dict(checkpoint['predictor_a2b'])
-        predictor_b2a.load_state_dict(checkpoint['predictor_b2a'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        epoch = checkpoint['epoch']
-        best_dice_a = checkpoint['best_dice_a']
-        best_dice_b = checkpoint['best_dice_b']
-        best_epoch_a = checkpoint['best_epoch_a']
-        best_epoch_b = checkpoint['best_epoch_b']
-        iter_num = checkpoint['iter_num']
-        start_time = checkpoint['start_time']
-        logger.info('************ Load from checkpoint at epoch %i\n' % epoch)
+        try:
+            if 'student_model' in checkpoint:
+                student_model.load_state_dict(checkpoint['student_model'])
+                teacher_model.load_state_dict(checkpoint['teacher_model'])
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                epoch = checkpoint['epoch']
+                best_dice_student = checkpoint['best_dice_student']
+                best_dice_teacher = checkpoint['best_dice_teacher']
+                best_epoch_student = checkpoint['best_epoch_student']
+                best_epoch_teacher = checkpoint['best_epoch_teacher']
+                iter_num = checkpoint['iter_num']
+                start_time = checkpoint['start_time']
+                logger.info('************ Load EMA checkpoint at epoch %i\n' % epoch)
+            else:
+                student_model.load_state_dict(checkpoint['model_a'], strict=False)
+                teacher_model.load_state_dict(checkpoint.get('teacher_model', checkpoint['model_a']), strict=False)
+                start_time = time.time()
+                logger.info('************ Load legacy student weights and reset optimizer state\n')
+        except Exception as exc:
+            start_time = time.time()
+            logger.warning('Checkpoint load failed, restart from scratch: %s', exc)
     else:
         start_time = time.time()
 
     for epoch in range(epoch + 1, cfg['epochs']):
         logger.info(
             f'===> Epoch: {epoch}/{cfg["epochs"]}, seed:{args.seed}, labelnum: {args.labelnum}, Previous best mdice '
-            f'UNet: {best_dice_a:.4f} @epoch: {best_epoch_a}, Transformer: {best_dice_b:.4f} @epoch: {best_epoch_b}'
+            f'Student: {best_dice_student:.4f} @epoch: {best_epoch_student}, Teacher: {best_dice_teacher:.4f} @epoch: {best_epoch_teacher}'
         )
         total_loss = AverageMeter()
         total_loss_sup = AverageMeter()
-        total_loss_ot = AverageMeter()
-        total_loss_sup_a = AverageMeter()
-        total_loss_sup_b = AverageMeter()
-        total_loss_ot_a2b = AverageMeter()
-        total_loss_ot_b2a = AverageMeter()
-        model_a.train()
-        model_b.train()
-        predictor_a2b.train()
-        predictor_b2a.train()
+        total_loss_consistency = AverageMeter()
+        total_loss_feature = AverageMeter()
+        total_loss_logits = AverageMeter()
+        student_model.train()
+        teacher_model.eval()
         is_best = False
 
         for i, (labeled_data, unlabeled_data) in enumerate(trainloader):
             step_stats = train_step(
                 labeled_data=labeled_data,
                 unlabeled_data=unlabeled_data,
-                model_a=model_a,
-                model_b=model_b,
-                predictor_a2b=predictor_a2b,
-                predictor_b2a=predictor_b2a,
+                student_model=student_model,
+                teacher_model=teacher_model,
                 optimizer=optimizer,
                 criterion_ce=criterion_l,
                 criterion_dice=diceloss,
-                ot_loss=ot_loss,
                 cfg=cfg,
+                ema_decay=args.ema_decay,
+                global_step=iter_num + 1,
             )
 
             total_loss.update(step_stats['loss'].item())
             total_loss_sup.update(step_stats['loss_sup'].item())
-            total_loss_ot.update(step_stats['loss_ot'].item())
-            total_loss_sup_a.update(step_stats['loss_sup_a'].item())
-            total_loss_sup_b.update(step_stats['loss_sup_b'].item())
-            total_loss_ot_a2b.update(step_stats['loss_ot_a2b'].item())
-            total_loss_ot_b2a.update(step_stats['loss_ot_b2a'].item())
+            total_loss_consistency.update(step_stats['loss_consistency'].item())
+            total_loss_feature.update(step_stats['loss_feature'].item())
+            total_loss_logits.update(step_stats['loss_logits'].item())
             iters = epoch * len(trainloader) + i
             lr = cfg['lr'] * (1 - iters / max(total_iters, 1)) ** 0.9
             optimizer.param_groups[0]['lr'] = lr
@@ -559,80 +582,72 @@ def main(args, cfg, save_path, cp_path):
             writer.add_scalar('train/loss_all', step_stats['loss'].item(), iters)
             writer.add_scalar('train/lr', lr, iters)
             writer.add_scalar('train/loss_sup', step_stats['loss_sup'].item(), iters)
-            writer.add_scalar('train/loss_ot', step_stats['loss_ot'].item(), iters)
-            writer.add_scalar('train/loss_sup_unet', step_stats['loss_sup_a'].item(), iters)
-            writer.add_scalar('train/loss_sup_transformer', step_stats['loss_sup_b'].item(), iters)
-            writer.add_scalar('train/loss_ot_a2b', step_stats['loss_ot_a2b'].item(), iters)
-            writer.add_scalar('train/loss_ot_b2a', step_stats['loss_ot_b2a'].item(), iters)
+            writer.add_scalar('train/loss_consistency', step_stats['loss_consistency'].item(), iters)
+            writer.add_scalar('train/loss_feature', step_stats['loss_feature'].item(), iters)
+            writer.add_scalar('train/loss_logits', step_stats['loss_logits'].item(), iters)
             writer.add_scalar('train/masked_ratio', step_stats['mask_ratio'].item(), iters)
-            writer.add_scalar('train/pseudo_fg_unet', step_stats['pseudo_fg_a'].item(), iters)
-            writer.add_scalar('train/pseudo_fg_transformer', step_stats['pseudo_fg_b'].item(), iters)
+            writer.add_scalar('train/pseudo_fg_student', step_stats['pseudo_fg_student'].item(), iters)
+            writer.add_scalar('train/pseudo_fg_teacher', step_stats['pseudo_fg_teacher'].item(), iters)
 
             if i % log_interval == 0:
                 logger.info(
                     f'Iters: {iter_num}/{total_iters}, LR: {lr:.7f}, Total loss: {total_loss.avg:.3f}'
-                    f', loss_sup: {total_loss_sup.avg:.3f}, loss_ot: {total_loss_ot.avg:.3f}'
-                    f', sup_unet: {total_loss_sup_a.avg:.3f}, sup_trans: {total_loss_sup_b.avg:.3f}'
-                    f', ot_a2b: {total_loss_ot_a2b.avg:.3f}, ot_b2a: {total_loss_ot_b2a.avg:.3f}'
+                    f', loss_sup: {total_loss_sup.avg:.3f}, loss_consistency: {total_loss_consistency.avg:.3f}'
+                    f', feature_l2: {total_loss_feature.avg:.3f}, logits_kl: {total_loss_logits.avg:.3f}'
                     f', masked_ratio: {step_stats["mask_ratio"].item():.4f}'
                 )
 
         if iter_num >= total_iters * 0.3 and epoch % 2 == 0:
-            model_a.eval()
-            mDice_a, dice_class_a = eval_2d(valloader, model_a, cfg, ifdist=False, val_mode='unet')
-            model_a.train()
-            model_b.eval()
-            mDice_b, dice_class_b = eval_2d(valloader, model_b, cfg, ifdist=False, val_mode='transformer')
-            model_b.train()
+            student_model.eval()
+            mDice_student, dice_class_student = eval_2d(valloader, student_model, cfg, ifdist=False, val_mode='student')
+            student_model.train()
+            teacher_model.eval()
+            mDice_teacher, dice_class_teacher = eval_2d(valloader, teacher_model, cfg, ifdist=False, val_mode='teacher')
 
-            for cls_idx, dice in enumerate(dice_class_a):
+            for cls_idx, dice in enumerate(dice_class_student):
                 class_name = class_names[cls_idx] if cls_idx < len(class_names) else str(cls_idx + 1)
-                logger.info('*** Evaluation: Class [{:} {:}] Dice UNet: {:.3f}, Transformer: {:.3f}'.format(
-                    cls_idx + 1, class_name, dice, dice_class_b[cls_idx]
+                logger.info('*** Evaluation: Class [{:} {:}] Dice Student: {:.3f}, Teacher: {:.3f}'.format(
+                    cls_idx + 1, class_name, dice, dice_class_teacher[cls_idx]
                 ))
-                writer.add_scalar(f'eval/{class_name}_unet_DICE', dice, epoch)
-                writer.add_scalar(f'eval/{class_name}_transformer_DICE', dice_class_b[cls_idx], epoch)
+                writer.add_scalar(f'eval/{class_name}_student_DICE', dice, epoch)
+                writer.add_scalar(f'eval/{class_name}_teacher_DICE', dice_class_teacher[cls_idx], epoch)
 
-            logger.info('*** Evaluation: MeanDice UNet: {:.3f}, Transformer: {:.3f}'.format(mDice_a, mDice_b))
-            writer.add_scalar('eval/mDice_unet', mDice_a.item(), epoch)
-            writer.add_scalar('eval/mDice_transformer', mDice_b.item(), epoch)
+            logger.info('*** Evaluation: MeanDice Student: {:.3f}, Teacher: {:.3f}'.format(mDice_student, mDice_teacher))
+            writer.add_scalar('eval/mDice_student', mDice_student.item(), epoch)
+            writer.add_scalar('eval/mDice_teacher', mDice_teacher.item(), epoch)
 
-            is_best = (mDice_a.item() >= best_dice_a) or (mDice_b.item() >= best_dice_b)
-            best_dice_a = max(mDice_a.item(), best_dice_a)
-            best_dice_b = max(mDice_b.item(), best_dice_b)
-            if mDice_a.item() == best_dice_a:
-                best_epoch_a = epoch
-            if mDice_b.item() == best_dice_b:
-                best_epoch_b = epoch
+            is_best = (mDice_student.item() >= best_dice_student) or (mDice_teacher.item() >= best_dice_teacher)
+            best_dice_student = max(mDice_student.item(), best_dice_student)
+            best_dice_teacher = max(mDice_teacher.item(), best_dice_teacher)
+            if mDice_student.item() == best_dice_student:
+                best_epoch_student = epoch
+            if mDice_teacher.item() == best_dice_teacher:
+                best_epoch_teacher = epoch
 
         checkpoint = {
-            'model_a': model_a.state_dict(),
-            'model_b': model_b.state_dict(),
-            'predictor_a2b': predictor_a2b.state_dict(),
-            'predictor_b2a': predictor_b2a.state_dict(),
+            'student_model': student_model.state_dict(),
+            'teacher_model': teacher_model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch,
-            'best_dice_a': best_dice_a,
-            'best_dice_b': best_dice_b,
-            'best_epoch_a': best_epoch_a,
-            'best_epoch_b': best_epoch_b,
+            'best_dice_student': best_dice_student,
+            'best_dice_teacher': best_dice_teacher,
+            'best_epoch_student': best_epoch_student,
+            'best_epoch_teacher': best_epoch_teacher,
             'iter_num': iter_num,
             'start_time': start_time,
         }
         torch.save(checkpoint, latest_path)
         model_ckpt = {
-            'model_a': model_a.state_dict(),
-            'model_b': model_b.state_dict(),
-            'predictor_a2b': predictor_a2b.state_dict(),
-            'predictor_b2a': predictor_b2a.state_dict(),
+            'student_model': student_model.state_dict(),
+            'teacher_model': teacher_model.state_dict(),
         }
         if is_best:
             logger.info(
-                '*** best checkpoint: MeanDice UNet: {:.3f}, Transformer: {:.3f}\n*** exp: {}'.format(
-                    best_dice_a, best_dice_b, args.exp
+                '*** best checkpoint: MeanDice Student: {:.3f}, Teacher: {:.3f}\n*** exp: {}'.format(
+                    best_dice_student, best_dice_teacher, args.exp
                 )
             )
-            torch.save(model_ckpt, os.path.join(cp_path, f'ep{epoch}_unet_{best_dice_a:.3f}_trans_{best_dice_b:.3f}.pth'))
+            torch.save(model_ckpt, os.path.join(cp_path, f'ep{epoch}_student_{best_dice_student:.3f}_teacher_{best_dice_teacher:.3f}.pth'))
 
         if epoch >= cfg['epochs'] - 1:
             end_time = time.time()

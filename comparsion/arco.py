@@ -717,7 +717,7 @@ def main(args, cfg, save_path, cp_path):
                 logger.info(
                     f'Iters: {iter_num}/{total_iters}, LR: {lr:.7f}, Total loss: {loss_meter.avg:.3f}, '
                     f'sup: {sup_meter.avg:.3f}, unsup: {unsup_meter.avg:.3f}, '
-                    f'reco: {reco_meter.avg:.3f}, revisit: {revisit_meter.avg:.3f}'
+                    f'reco: {reco_meter.avg:.3f}, revisit: {revisit_meter.avg:.3f}, l_q: {loss_q.item():.3f}'
                 )
 
         if iter_num >= total_iters * 0.3 and epoch % 2 == 0:
@@ -743,7 +743,7 @@ def main(args, cfg, save_path, cp_path):
                 writer.add_scalar(f'eval/{class_name}_model_DICE', float(dice), epoch)
                 writer.add_scalar(f'eval/{class_name}_ema_DICE', float(dice_class_ema[cls_idx]), epoch)
 
-            logger.info('*** Evaluation: MeanDice model: {:.3f}, ema: {:.3f}', mDice.item(), mDice_ema.item())
+            logger.info('*** Evaluation: MeanDice model: %.3f, ema: %.3f', mDice.item(), mDice_ema.item())
             writer.add_scalar('eval/mDice_model', mDice.item(), epoch)
             writer.add_scalar('eval/mDice_ema', mDice_ema.item(), epoch)
 
@@ -792,7 +792,7 @@ def main(args, cfg, save_path, cp_path):
 
         if epoch >= cfg['epochs'] - 1:
             end_time = time.time()
-            logger.info('Training time: {:.2f}s', end_time - start_time)
+            logger.info('Training time: %.2fs', end_time - start_time)
             gc.collect()
             torch.cuda.empty_cache()
             writer.close()
