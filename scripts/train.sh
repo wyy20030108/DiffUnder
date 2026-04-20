@@ -1,5 +1,5 @@
 #!/bin/bash
-GPUID=2
+GPUID=7
 
 CUDA_VISIBLE_DEVICES=$GPUID python JEPA_OT.py \
  --cli_dataset "5acdc" \

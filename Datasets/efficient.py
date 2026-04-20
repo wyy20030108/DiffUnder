@@ -7,7 +7,7 @@ from torch.utils.data.dataloader import default_collate
 from torch.utils.data import Dataset
 import h5py
 from copy import deepcopy
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
@@ -220,6 +220,20 @@ class ACDCsemiDataset(Dataset):
         image, mask = hflip(image, mask)
         return image, mask
 
+    def _apply_intensity_aug(self, image):
+        # Keep geometry aligned with img_w; only perturb intensity statistics for img_s.
+        if random.random() < 0.8:
+            image = ImageEnhance.Contrast(image).enhance(random.uniform(0.75, 1.25))
+        if random.random() < 0.5:
+            image = ImageEnhance.Brightness(image).enhance(random.uniform(0.85, 1.15))
+        image = blur(image, p=0.5)
+        if random.random() < 0.5:
+            image_np = np.asarray(image, dtype=np.float32)
+            noise_std = random.uniform(2.0, 8.0)
+            image_np = image_np + np.random.normal(0.0, noise_std, size=image_np.shape)
+            image = Image.fromarray(np.uint8(np.clip(image_np, 0, 255)))
+        return image
+
     def __getitem__(self, idx):
         sample_name = self.name_list[idx]
         sample_path = self._get_sample_path(sample_name)
@@ -235,8 +249,9 @@ class ACDCsemiDataset(Dataset):
             return self._to_tensor_image(image_pil), self._to_tensor_mask(mask_pil)
 
         if self.mode == 'train_u':
+            # img_w and img_s must remain spatially aligned for teacher/student consistency.
             image_w, mask_w = self._apply_train_aug(image_pil, mask_pil, ignore_value=254)
-            image_s = blur(deepcopy(image_w), p=0.5)
+            image_s = self._apply_intensity_aug(deepcopy(image_w))
             ignore_mask = np.zeros(np.asarray(mask_w).shape, dtype=np.uint8)
             ignore_mask[np.asarray(mask_w) == 254] = 255
             cutmix_box = obtain_cutmix_box(min(image_s.size))

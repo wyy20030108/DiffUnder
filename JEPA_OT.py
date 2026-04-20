@@ -52,7 +52,12 @@ DEFAULT_ACDC_CFG = {
     'consistency_weight': 0.5,
     'consistency_mode': 'l2',
     'mask_ratio': 0.2,
+    'max_mask_ratio': 0.45,
     'mask_block_size': 32,
+    'entropy_thresh': 0.15,
+    'ignore_conf_thresh': 0.7,
+    'feature_drop_prob': 0.7,
+    'feature_noise_std': 0.15,
     'feature_dim': 64,
     'sinkhorn_eps': 0.05,
     'sinkhorn_iters': 30,
@@ -137,58 +142,139 @@ def build_class_names(cfg):
     return class_names[:cfg['nclass'] - 1]
 
 
-def build_saliency_map(image):
-    gray = image.float().mean(dim=1, keepdim=True)
-    smooth = F.avg_pool2d(gray, kernel_size=7, stride=1, padding=3)
-    saliency = (gray - smooth).abs()
-    saliency = saliency / saliency.amax(dim=(2, 3), keepdim=True).clamp_min(1e-6)
-    return saliency
+def compute_teacher_confidence(teacher_logits):
+    probs = torch.softmax(teacher_logits, dim=1)
+    confidence = probs.amax(dim=1, keepdim=True)
+    entropy = -(probs * torch.log(probs.clamp_min(1e-6))).sum(dim=1, keepdim=True)
+    entropy = entropy / np.log(teacher_logits.shape[1])
+    return probs, confidence, entropy
 
 
-def generate_2d_mask(feature, mask_ratio=0.2, min_block_size=16, max_block_size=None, saliency_map=None):
-    b, _, h, w = feature.shape
-    device = feature.device
-    context_mask = torch.ones((b, 1, h, w), device=device, dtype=feature.dtype)
-    total_pixels = h * w
-    mask_ratio = float(np.clip(mask_ratio, 0.0, 0.35))
-    target_pixels = max(1, int(total_pixels * mask_ratio))
+def generate_confidence_guided_mask(confidence_score, candidate_mask, mask_ratios, min_block_size=16, max_block_size=None):
+    b, _, h, w = confidence_score.shape
+    target_mask = torch.zeros_like(candidate_mask, dtype=confidence_score.dtype)
     max_block_size = max_block_size or max(min_block_size, min(h, w) // 4)
     max_block_size = max(1, min(max_block_size, min(h, w)))
     min_block_size = max(1, min(min_block_size, max_block_size))
 
     for idx in range(b):
+        candidate = candidate_mask[idx, 0] > 0.5
+        candidate_count = int(candidate.sum().item())
+        if candidate_count == 0:
+            continue
+
+        target_pixels = max(1, int(candidate_count * float(mask_ratios[idx].item())))
         masked_pixels = 0
         attempts = 0
-        while masked_pixels < target_pixels and attempts < 64:
-            candidate_region = None
-            candidate_score = None
-            for _ in range(4):
+
+        while masked_pixels < target_pixels and attempts < 96:
+            best_region = None
+            best_score = None
+            for _ in range(6):
                 block_h = random.randint(min_block_size, max_block_size)
                 block_w = random.randint(min_block_size, max_block_size)
                 top = random.randint(0, max(h - block_h, 0))
                 left = random.randint(0, max(w - block_w, 0))
-                score = 0.0
-                if saliency_map is not None:
-                    score = saliency_map[idx, :, top:top + block_h, left:left + block_w].mean().item()
-                if candidate_region is None or score < candidate_score:
-                    candidate_region = (top, left, block_h, block_w)
-                    candidate_score = score
-            top, left, block_h, block_w = candidate_region
-            region = context_mask[idx, :, top:top + block_h, left:left + block_w]
-            newly_masked = region.sum().item()
-            region.zero_()
-            masked_pixels += int(newly_masked)
+                region_candidate = candidate[top:top + block_h, left:left + block_w]
+                if not region_candidate.any():
+                    continue
+                region_score = confidence_score[idx, 0, top:top + block_h, left:left + block_w][region_candidate].mean().item()
+                if best_region is None or region_score > best_score:
+                    best_region = (top, left, block_h, block_w)
+                    best_score = region_score
+
+            if best_region is None:
+                break
+
+            top, left, block_h, block_w = best_region
+            region_target = target_mask[idx, 0, top:top + block_h, left:left + block_w]
+            region_candidate = candidate[top:top + block_h, left:left + block_w]
+            region_new = region_candidate & (region_target < 0.5)
+            newly_masked = int(region_new.sum().item())
+            if newly_masked == 0:
+                attempts += 1
+                continue
+            region_target[region_new] = 1.0
+            masked_pixels += newly_masked
             attempts += 1
 
-        if masked_pixels == 0:
-            center_h = max(1, h // 4)
-            center_w = max(1, w // 4)
-            top = max(0, (h - center_h) // 2)
-            left = max(0, (w - center_w) // 2)
-            context_mask[idx, :, top:top + center_h, left:left + center_w] = 0
+        if masked_pixels < target_pixels:
+            remaining_mask = candidate & (target_mask[idx, 0] < 0.5)
+            remaining_count = int(remaining_mask.sum().item())
+            if remaining_count > 0:
+                remaining = min(target_pixels - masked_pixels, remaining_count)
+                coords = remaining_mask.nonzero(as_tuple=False)
+                scores = confidence_score[idx, 0, coords[:, 0], coords[:, 1]]
+                selected = torch.topk(scores, k=remaining).indices
+                chosen = coords[selected]
+                target_mask[idx, 0, chosen[:, 0], chosen[:, 1]] = 1.0
 
-    target_mask = 1.0 - context_mask
-    return context_mask, target_mask
+    return target_mask
+
+
+def build_confidence_guided_targets(teacher_logits, valid_mask, cfg):
+    _, confidence, entropy = compute_teacher_confidence(teacher_logits)
+    high_conf_mask = (
+        (confidence >= cfg['conf_thresh'])
+        & (entropy <= cfg['entropy_thresh'])
+        & (valid_mask > 0)
+    ).float()
+
+    valid_pixels = valid_mask.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    mean_confidence = (confidence * valid_mask).sum(dim=(1, 2, 3)) / valid_pixels
+    mean_entropy = (entropy * valid_mask).sum(dim=(1, 2, 3)) / valid_pixels
+    reliable_pixels = high_conf_mask.sum(dim=(1, 2, 3))
+    reliable_ratio = reliable_pixels / valid_pixels
+
+    conf_progress = ((mean_confidence - cfg['ignore_conf_thresh']) / (1.0 - cfg['ignore_conf_thresh'])).clamp(0.0, 1.0)
+    entropy_progress = (1.0 - mean_entropy / max(cfg['entropy_thresh'], 1e-6)).clamp(0.0, 1.0)
+    dynamic_ratio = cfg['mask_ratio'] + (cfg['max_mask_ratio'] - cfg['mask_ratio']) * (0.5 * conf_progress + 0.5 * entropy_progress)
+    dynamic_ratio = dynamic_ratio * (reliable_ratio > 0).float()
+    dynamic_ratio = dynamic_ratio.clamp(min=0.0, max=cfg['max_mask_ratio'])
+
+    confidence_score = confidence * (1.0 - entropy) * high_conf_mask
+    target_mask = generate_confidence_guided_mask(
+        confidence_score=confidence_score,
+        candidate_mask=high_conf_mask,
+        mask_ratios=dynamic_ratio,
+        min_block_size=cfg['mask_block_size'],
+    )
+    return {
+        'target_mask': target_mask,
+        'high_conf_mask': high_conf_mask,
+        'confidence': confidence,
+        'entropy': entropy,
+        'mean_confidence': mean_confidence.mean(),
+        'mean_entropy': mean_entropy.mean(),
+        'reliable_ratio': reliable_ratio.mean(),
+        'dynamic_mask_ratio': dynamic_ratio.mean(),
+    }
+
+
+def apply_feature_perturbation(feature, perturb_mask, drop_prob=0.7, noise_std=0.15):
+    if perturb_mask is None:
+        return feature
+
+    spatial_mask = F.interpolate(perturb_mask.float(), size=feature.shape[-2:], mode='nearest')
+    if spatial_mask.max().item() <= 0:
+        return feature
+
+    spatial_mask = spatial_mask.expand_as(feature)
+    feature_mean = feature.mean(dim=(2, 3), keepdim=True)
+    feature_std = feature.detach().flatten(2).std(dim=2, keepdim=True).unsqueeze(-1).clamp_min(1e-6)
+    noise = torch.randn_like(feature) * feature_std * noise_std
+    noisy_feature = feature + noise
+
+    if drop_prob > 0:
+        drop_mask = (torch.rand_like(perturb_mask.float()) < drop_prob).float()
+        drop_mask = F.interpolate(drop_mask, size=feature.shape[-2:], mode='nearest').expand_as(feature) * spatial_mask
+    else:
+        drop_mask = spatial_mask
+
+    perturbed_feature = feature * (1.0 - spatial_mask) + noisy_feature * spatial_mask
+    fill_feature = feature_mean + noise
+    perturbed_feature = perturbed_feature * (1.0 - drop_mask) + fill_feature * drop_mask
+    return perturbed_feature
 
 
 class UNetFeatureBranch(nn.Module):
@@ -201,8 +287,23 @@ class UNetFeatureBranch(nn.Module):
             nn.GELU(),
         )
 
-    def forward(self, x, return_feature=False):
+    def forward(
+        self,
+        x,
+        return_feature=False,
+        perturb_mask=None,
+        feature_drop_prob=0.0,
+        feature_noise_std=0.0,
+    ):
         logits, feature = self.backbone(x, use_feature=True)
+        if perturb_mask is not None and (feature_drop_prob > 0 or feature_noise_std > 0):
+            feature = apply_feature_perturbation(
+                feature,
+                perturb_mask=perturb_mask,
+                drop_prob=feature_drop_prob,
+                noise_std=feature_noise_std,
+            )
+            logits = self.backbone.classifier(feature)
         feature = self.feature_proj(feature)
         if return_feature:
             return logits, feature
@@ -261,25 +362,20 @@ def train_step(
     student_logits = student_model(img_x)
     loss_sup = compute_supervised_loss(student_logits, mask_x, criterion_ce, criterion_dice)
 
-    saliency_map = build_saliency_map(img_s)
-    context_mask, target_mask = generate_2d_mask(
-        img_s,
-        mask_ratio=cfg['mask_ratio'],
-        min_block_size=cfg['mask_block_size'],
-        saliency_map=saliency_map,
-    )
     valid_mask = (ignore_mask != 255).unsqueeze(1).float()
-    context_mask = context_mask * valid_mask
-    target_mask = target_mask * valid_mask
-    fallback_mask = (target_mask.sum(dim=(1, 2, 3), keepdim=True) == 0).float()
-    target_mask = target_mask + fallback_mask * valid_mask
-    target_mask = (target_mask > 0).float()
-
-    student_context = img_s * context_mask
-    student_unlabeled_logits, student_unlabeled_feature = student_model(student_context, return_feature=True)
     with torch.no_grad():
         teacher_model.eval()
         teacher_unlabeled_logits, teacher_unlabeled_feature = teacher_model(img_w, return_feature=True)
+        confidence_targets = build_confidence_guided_targets(teacher_unlabeled_logits, valid_mask, cfg)
+
+    target_mask = confidence_targets['target_mask']
+    student_unlabeled_logits, student_unlabeled_feature = student_model(
+        img_s,
+        return_feature=True,
+        perturb_mask=target_mask,
+        feature_drop_prob=cfg['feature_drop_prob'],
+        feature_noise_std=cfg['feature_noise_std'],
+    )
 
     loss_feature = compute_pixel_consistency_loss(
         student_unlabeled_feature,
@@ -312,6 +408,10 @@ def train_step(
         'loss_feature': loss_feature.detach(),
         'loss_logits': loss_logits.detach(),
         'mask_ratio': target_mask.mean().detach(),
+        'dynamic_mask_ratio': confidence_targets['dynamic_mask_ratio'].detach(),
+        'reliable_ratio': confidence_targets['reliable_ratio'].detach(),
+        'mean_confidence': confidence_targets['mean_confidence'].detach(),
+        'mean_entropy': confidence_targets['mean_entropy'].detach(),
         'pseudo_fg_student': student_fg.detach(),
         'pseudo_fg_teacher': teacher_fg.detach(),
     }
@@ -452,15 +552,23 @@ def main(args, cfg, save_path, cp_path):
             writer.add_scalar('train/loss_feature', step_stats['loss_feature'].item(), iters)
             writer.add_scalar('train/loss_logits', step_stats['loss_logits'].item(), iters)
             writer.add_scalar('train/masked_ratio', step_stats['mask_ratio'].item(), iters)
+            writer.add_scalar('train/dynamic_mask_ratio', step_stats['dynamic_mask_ratio'].item(), iters)
+            writer.add_scalar('train/reliable_ratio', step_stats['reliable_ratio'].item(), iters)
+            writer.add_scalar('train/mean_confidence', step_stats['mean_confidence'].item(), iters)
+            writer.add_scalar('train/mean_entropy', step_stats['mean_entropy'].item(), iters)
             writer.add_scalar('train/pseudo_fg_student', step_stats['pseudo_fg_student'].item(), iters)
             writer.add_scalar('train/pseudo_fg_teacher', step_stats['pseudo_fg_teacher'].item(), iters)
 
             if i % log_interval == 0:
                 logger.info(
-                    f'Iters: {iter_num}/{total_iters}, LR: {lr:.7f}, Total loss: {total_loss.avg:.3f}'
-                    f', loss_sup: {total_loss_sup.avg:.3f}, loss_consistency: {total_loss_consistency.avg:.3f}'
+                    f'Iters: {iter_num}/{total_iters}, loss: {total_loss.avg:.3f}'
+                    f', l_l: {total_loss_sup.avg:.3f}, l_consis: {total_loss_consistency.avg:.3f}'
                     f', feature_l2: {total_loss_feature.avg:.3f}, logits_kl: {total_loss_logits.avg:.3f}'
                     f', masked_ratio: {step_stats["mask_ratio"].item():.4f}'
+                    f', dyn_ratio: {step_stats["dynamic_mask_ratio"].item():.4f}'
+                    f', relia_ratio: {step_stats["reliable_ratio"].item():.4f}'
+                    f', mean_conf: {step_stats["mean_confidence"].item():.4f}'
+                    f', mean_ent: {step_stats["mean_entropy"].item():.4f}'
                 )
 
         if iter_num >= total_iters * 0.3 and epoch % 2 == 0:
