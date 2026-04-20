@@ -14,6 +14,7 @@ from Datasets.efficient import BUSISemiDataset
 from models.unet2d import UNet
 from utils.classes import CLASSES
 
+# python test_busi.py --device 0 --save_pred_root /data/lhy_data/checkpoints_wyy/test/arco_busi --save_model_path 
 def get_parser():
     parser = argparse.ArgumentParser(description='BUSI test script')
     parser.add_argument('--dataset', type=str, default='BUSI')

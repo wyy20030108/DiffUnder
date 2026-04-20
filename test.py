@@ -15,7 +15,7 @@ from Datasets.efficient import ACDCsemiDataset
 from models.unet2d import UNet
 from utils.classes import CLASSES
 
-
+# python test.py --device 1 --save_model_path /data/lhy_data/checkpoints_wyy/ARCO/Ep200bs8_ACDC_seed2026_label3/ARCO/ep194_m0.601_ema0.604.pth
 def get_parser():
     parser = argparse.ArgumentParser(description='2D test script')
     parser.add_argument('--dataset', type=str, default='ACDC')
