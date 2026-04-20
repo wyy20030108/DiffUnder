@@ -1,8 +1,8 @@
 #!/bin/bash
 GPUID=2
 
-CUDA_VISIBLE_DEVICES=$GPUID python c_busi/jepa_ours.py \
+CUDA_VISIBLE_DEVICES=$GPUID python c_busi/ot_arco_busi.py \
  --cli_dataset "8busi" \
  --seed 2027 \
- --exp "OT-JEPA" \
+ --exp "ARCO_OT" \
  --device "cuda:$GPUID"

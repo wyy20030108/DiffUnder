@@ -75,6 +75,14 @@ def get_parser(datasetname):
     parser.add_argument('--func', type=str, default='smc', choices=['asmc', 'smc', 'rand'])
     parser.add_argument('--memobank_size', type=int, default=30000)
     parser.add_argument('--memobank_bg_size', type=int, default=50000)
+    parser.add_argument('--ot_weight', type=float, default=0.5)
+    parser.add_argument('--sinkhorn_eps', type=float, default=0.5)
+    parser.add_argument('--sinkhorn_iters', type=int, default=5)
+    parser.add_argument('--class_prior', type=str, default=None)
+    parser.add_argument('--prior_momentum', type=float, default=0.99)
+    parser.add_argument('--prototype_momentum', type=float, default=0.99)
+    parser.add_argument('--prototype_threshold', type=float, default=0.8)
+    parser.add_argument('--prototype_temperature', type=float, default=0.5)
     return parser
 
 
@@ -252,6 +260,157 @@ def percentile_threshold(values, percentile, default_value):
         return values.new_tensor(default_value)
     q = torch.tensor(percentile / 100.0, device=values.device, dtype=values.dtype)
     return torch.quantile(values.float(), q).to(values.dtype)
+
+
+def normalize_distribution(distribution):
+    distribution = distribution.float().clamp_min(1e-8)
+    return distribution / distribution.sum().clamp_min(1e-8)
+
+
+def parse_class_prior(prior_source, num_classes):
+    if prior_source is None:
+        return None
+    if isinstance(prior_source, str):
+        cleaned = prior_source.strip().strip('[]')
+        if not cleaned:
+            return None
+        values = [float(item.strip()) for item in cleaned.split(',') if item.strip()]
+        prior = torch.tensor(values, dtype=torch.float32)
+    else:
+        prior = torch.as_tensor(prior_source, dtype=torch.float32)
+
+    if prior.numel() == num_classes - 1:
+        bg_prior = max(1e-6, 1.0 - prior.sum().item())
+        prior = torch.cat((torch.tensor([bg_prior], dtype=torch.float32), prior), dim=0)
+    if prior.numel() != num_classes:
+        raise ValueError(f'class_prior length mismatch: expected {num_classes}, got {prior.numel()}')
+    return normalize_distribution(prior)
+
+
+def build_target_prior(args, cfg, num_classes, device):
+    prior_source = args.class_prior if args.class_prior is not None else cfg.get('class_prior')
+    if prior_source is None:
+        return torch.full((num_classes,), 1.0 / num_classes, device=device), False
+    prior = parse_class_prior(prior_source, num_classes).to(device)
+    return prior, True
+
+
+@torch.no_grad()
+def update_running_prior(running_prior, labels, num_classes, momentum):
+    valid_labels = labels[(labels >= 0) & (labels != 255)]
+    if valid_labels.numel() == 0:
+        return
+    batch_hist = torch.bincount(valid_labels.view(-1), minlength=num_classes).float().to(running_prior.device)
+    batch_hist = normalize_distribution(batch_hist)
+    running_prior.mul_(momentum).add_(batch_hist, alpha=1 - momentum)
+    running_prior.copy_(normalize_distribution(running_prior))
+
+
+@torch.no_grad()
+def sinkhorn_align_distribution(prob_map, valid_mask, target_prior, eps=0.5, num_iters=5):
+    batch_size, num_classes, height, width = prob_map.shape
+    flat_prob = prob_map.permute(0, 2, 3, 1).reshape(-1, num_classes)
+    flat_valid = valid_mask.reshape(-1).bool()
+    if flat_valid.sum() == 0:
+        return prob_map.detach()
+
+    prob_valid = flat_prob[flat_valid].detach()
+    kernel = torch.exp(torch.log(prob_valid.clamp_min(1e-6)) / max(eps, 1e-3)).clamp_min(1e-8)
+    row_prior = torch.full(
+        (kernel.shape[0],),
+        1.0 / max(kernel.shape[0], 1),
+        device=kernel.device,
+        dtype=kernel.dtype,
+    )
+    col_prior = normalize_distribution(target_prior.to(kernel.device, kernel.dtype))
+    transport = kernel
+    for _ in range(num_iters):
+        transport = transport * (row_prior / transport.sum(dim=1).clamp_min(1e-8)).unsqueeze(1)
+        transport = transport * (col_prior / transport.sum(dim=0).clamp_min(1e-8)).unsqueeze(0)
+    transport = transport / transport.sum(dim=1, keepdim=True).clamp_min(1e-8)
+
+    aligned = flat_prob.clone()
+    aligned[flat_valid] = transport
+    return aligned.view(batch_size, height, width, num_classes).permute(0, 3, 1, 2)
+
+
+def compute_distribution_alignment_loss(logits, soft_target, valid_mask):
+    per_pixel = -(soft_target * F.log_softmax(logits, dim=1)).sum(dim=1)
+    valid = valid_mask.float()
+    return (per_pixel * valid).sum() / valid.sum().clamp_min(1.0)
+
+
+@torch.no_grad()
+def update_ema_prototypes(prototypes, prototype_mask, features, labels, valid_mask, momentum):
+    feature_map = F.normalize(features.permute(0, 2, 3, 1), dim=-1)
+    valid_mask = valid_mask.bool()
+    for cls_idx in range(prototypes.shape[0]):
+        cls_mask = valid_mask & (labels == cls_idx)
+        if not cls_mask.any():
+            continue
+        batch_proto = feature_map[cls_mask].mean(dim=0)
+        batch_proto = F.normalize(batch_proto.unsqueeze(0), dim=1).squeeze(0)
+        if prototype_mask[cls_idx]:
+            updated = momentum * prototypes[cls_idx] + (1 - momentum) * batch_proto
+            prototypes[cls_idx] = F.normalize(updated.unsqueeze(0), dim=1).squeeze(0)
+        else:
+            prototypes[cls_idx] = batch_proto
+            prototype_mask[cls_idx] = True
+
+
+def compute_prototype_contrastive_loss(
+    rep_l,
+    mask_l,
+    rep_u,
+    pseudo_u,
+    valid_u_mask,
+    prototypes,
+    prototype_mask,
+    func='smc',
+    num_queries=256,
+    temp=0.5,
+):
+    available_classes = torch.nonzero(prototype_mask, as_tuple=False).flatten()
+    if available_classes.numel() <= 1:
+        return rep_l.sum() * 0.0
+
+    sample_fn = {'asmc': grid_as_monte_carlo_sample, 'smc': grid_monte_carlo_sample}.get(func, monte_carlo_sample)
+    proto_bank = F.normalize(prototypes[available_classes], dim=1)
+    class_to_bank_idx = {int(cls.item()): idx for idx, cls in enumerate(available_classes)}
+
+    feature_l = F.normalize(rep_l.permute(0, 2, 3, 1), dim=-1)
+    feature_u = F.normalize(rep_u.permute(0, 2, 3, 1), dim=-1)
+    losses = []
+
+    for cls_idx in available_classes.tolist():
+        feature_list = []
+        labeled_mask = mask_l == cls_idx
+        if labeled_mask.any():
+            feature_list.append(feature_l[labeled_mask])
+
+        unlabeled_mask = valid_u_mask & (pseudo_u == cls_idx)
+        if unlabeled_mask.any():
+            feature_list.append(feature_u[unlabeled_mask])
+
+        if not feature_list:
+            continue
+
+        cls_features = torch.cat(feature_list, dim=0)
+        sample_count = min(num_queries, cls_features.shape[0])
+        sample_idx = sample_fn(cls_features.shape[0], sample_count).to(cls_features.device)
+        anchor_features = cls_features[sample_idx]
+        logits = torch.matmul(anchor_features, proto_bank.t()) / temp
+        targets = torch.full(
+            (sample_count,),
+            class_to_bank_idx[cls_idx],
+            dtype=torch.long,
+            device=anchor_features.device,
+        )
+        losses.append(F.cross_entropy(logits, targets))
+
+    if not losses:
+        return rep_l.sum() * 0.0
+    return torch.stack(losses).mean()
 
 
 def get_revisiting_loss(random_pool, rep_u, rep_u_teacher, topk=5):
@@ -512,12 +671,13 @@ def main(args, cfg, save_path, cp_path):
 
     total_iters = len(trainloader) * cfg['epochs']
     logger.info('Total iters: %d', total_iters)
+    log_interval = max(len(trainloader) // 8, 1)
 
     random_pool = F.normalize(torch.randn(args.K, feature_dim_sum, device='cuda'), dim=1)
     random_pool_ptr = torch.zeros(1, dtype=torch.long, device='cuda')
-    memobank = [[torch.empty((0, feature_dim_sum), dtype=torch.float32)] for _ in range(cfg['nclass'])]
-    queue_ptrlis = [torch.zeros(1, dtype=torch.long) for _ in range(cfg['nclass'])]
-    queue_size = [args.memobank_bg_size] + [args.memobank_size] * (cfg['nclass'] - 1)
+    class_prototypes = torch.zeros((cfg['nclass'], feature_dim_sum), dtype=torch.float32, device='cuda')
+    prototype_mask = torch.zeros(cfg['nclass'], dtype=torch.bool, device='cuda')
+    target_prior, use_fixed_prior = build_target_prior(args, cfg, cfg['nclass'], class_prototypes.device)
 
     pre_best_dice = 0.0
     pre_best_dice_ema = 0.0
@@ -539,6 +699,12 @@ def main(args, cfg, save_path, cp_path):
             random_pool.copy_(checkpoint['random_pool'].cuda())
         if 'random_pool_ptr' in checkpoint:
             random_pool_ptr.copy_(checkpoint['random_pool_ptr'].cuda())
+        if 'class_prototypes' in checkpoint:
+            class_prototypes.copy_(checkpoint['class_prototypes'].cuda())
+        if 'prototype_mask' in checkpoint:
+            prototype_mask.copy_(checkpoint['prototype_mask'].cuda())
+        if 'target_prior' in checkpoint:
+            target_prior.copy_(checkpoint['target_prior'].cuda())
         epoch = checkpoint['epoch']
         pre_best_dice = checkpoint['previous_best']
         pre_best_dice_ema = checkpoint['previous_best_ema']
@@ -561,7 +727,8 @@ def main(args, cfg, save_path, cp_path):
         loss_meter = AverageMeter()
         sup_meter = AverageMeter()
         unsup_meter = AverageMeter()
-        reco_meter = AverageMeter()
+        ot_meter = AverageMeter()
+        proto_meter = AverageMeter()
         revisit_meter = AverageMeter()
         is_best = False
         mDice = torch.tensor(pre_best_dice)
@@ -616,6 +783,7 @@ def main(args, cfg, save_path, cp_path):
             supervised_loss = loss_ce + loss_dice
 
             train_u_aug_ignore_mask = ignore_mask
+            valid_u_mask = (train_u_aug_label >= 0) & (train_u_aug_ignore_mask != 255)
             unsup_loss = compute_unsupervised_loss(
                 pred_u,
                 train_u_aug_label,
@@ -624,53 +792,44 @@ def main(args, cfg, save_path, cp_path):
                 ignore_mask=train_u_aug_ignore_mask,
             )
 
-            valid_u_mask = (train_u_aug_label >= 0) & (train_u_aug_ignore_mask != 255)
-            alpha_t = 20 * (1 - epoch / max(cfg['epochs'], 1))
             with torch.no_grad():
-                label_l = label_onehot(mask_x, cfg['nclass'])
-                label_u = label_onehot(train_u_aug_label, cfg['nclass'])
+                if not use_fixed_prior:
+                    update_running_prior(target_prior, mask_x, cfg['nclass'], args.prior_momentum)
+
                 prob_l_teacher = torch.softmax(pred_l_teacher, dim=1)
                 prob_u_teacher = torch.softmax(pred_u_teacher, dim=1)
 
-                entropy = -torch.sum(prob_u_teacher * torch.log(prob_u_teacher + 1e-10), dim=1)
-                valid_entropy = entropy[valid_u_mask]
-                low_thresh = percentile_threshold(valid_entropy, alpha_t, 0.0)
-                high_thresh = percentile_threshold(valid_entropy, 100 - alpha_t, 1.0)
-                low_entropy_mask = entropy.le(low_thresh) & valid_u_mask
-                high_entropy_mask = entropy.ge(high_thresh) & valid_u_mask
-
-                low_mask_all = torch.cat(
-                    (
-                        torch.ones((mask_x.shape[0], 1, mask_x.shape[1], mask_x.shape[2]), device=mask_x.device),
-                        low_entropy_mask.unsqueeze(1).float(),
-                    ),
-                    dim=0,
+                aligned_prob_u = sinkhorn_align_distribution(
+                    prob_u_teacher.detach(),
+                    valid_u_mask,
+                    target_prior,
+                    eps=args.sinkhorn_eps,
+                    num_iters=args.sinkhorn_iters,
                 )
-                high_mask_all = torch.cat(
-                    (
-                        torch.ones((mask_x.shape[0], 1, mask_x.shape[1], mask_x.shape[2]), device=mask_x.device),
-                        high_entropy_mask.unsqueeze(1).float(),
-                    ),
-                    dim=0,
+                aligned_conf_u, aligned_label_u = torch.max(aligned_prob_u, dim=1)
+                prototype_valid_u = valid_u_mask & aligned_conf_u.ge(args.prototype_threshold)
+                labeled_valid = torch.ones_like(mask_x, dtype=torch.bool)
+                update_ema_prototypes(
+                    class_prototypes,
+                    prototype_mask,
+                    torch.cat((rep_l_teacher, rep_u_teacher), dim=0).detach(),
+                    torch.cat((mask_x, aligned_label_u), dim=0),
+                    torch.cat((labeled_valid, prototype_valid_u), dim=0),
+                    args.prototype_momentum,
                 )
 
-            reco_loss = compute_contra_memobank_loss(
-                rep=torch.cat((rep_l, rep_u), dim=0),
-                label_l=label_l,
-                label_u=label_u,
-                prob_l=prob_l_teacher.detach(),
-                prob_u=prob_u_teacher.detach(),
-                low_mask=low_mask_all,
-                high_mask=high_mask_all,
-                memobank=memobank,
-                queue_ptrlis=queue_ptrlis,
-                queue_size=queue_size,
-                rep_teacher=torch.cat((rep_l_teacher, rep_u_teacher), dim=0).detach(),
-                delta_n=args.strong_threshold_u2pl,
+            ot_loss = compute_distribution_alignment_loss(pred_u, aligned_prob_u, valid_u_mask)
+            proto_loss = compute_prototype_contrastive_loss(
+                rep_l=rep_l,
+                mask_l=mask_x,
+                rep_u=rep_u,
+                pseudo_u=aligned_label_u,
+                valid_u_mask=prototype_valid_u,
+                prototypes=class_prototypes.detach(),
+                prototype_mask=prototype_mask.detach(),
                 func=args.func,
                 num_queries=args.num_queries,
-                num_negatives=args.num_negatives,
-                temp=args.reco_temperature,
+                temp=args.prototype_temperature,
             )
 
             loss_q, pooled_rep_u_teacher = get_revisiting_loss(random_pool, rep_u, rep_u_teacher, topk=args.topk)
@@ -679,7 +838,8 @@ def main(args, cfg, save_path, cp_path):
             loss = (
                 supervised_loss
                 + args.unsup_weight * unsup_loss
-                + args.reco_weight * reco_loss
+                + args.ot_weight * ot_loss
+                + args.reco_weight * proto_loss
                 + args.revisit_weight * loss_q
             )
 
@@ -699,7 +859,8 @@ def main(args, cfg, save_path, cp_path):
             loss_meter.update(loss.item())
             sup_meter.update(supervised_loss.item())
             unsup_meter.update(unsup_loss.item())
-            reco_meter.update(reco_loss.item())
+            ot_meter.update(ot_loss.item())
+            proto_meter.update(proto_loss.item())
             revisit_meter.update(loss_q.item())
 
             writer.add_scalar('train/loss_all', loss.item(), iters)
@@ -708,16 +869,19 @@ def main(args, cfg, save_path, cp_path):
             writer.add_scalar('train/loss_dice', loss_dice.item(), iters)
             writer.add_scalar('train/loss_sup', supervised_loss.item(), iters)
             writer.add_scalar('train/loss_unsup', unsup_loss.item(), iters)
-            writer.add_scalar('train/loss_reco', reco_loss.item(), iters)
+            writer.add_scalar('train/loss_ot', ot_loss.item(), iters)
+            writer.add_scalar('train/loss_proto', proto_loss.item(), iters)
             writer.add_scalar('train/loss_revisit', loss_q.item(), iters)
             writer.add_scalar('train/pseudo_fg_ratio', (train_u_aug_label > 0).float().mean().item(), iters)
             writer.add_scalar('train/pseudo_conf_ratio', train_u_aug_logits.ge(args.strong_threshold).float().mean().item(), iters)
+            writer.add_scalar('train/prior_fg_ratio', target_prior[1:].sum().item(), iters)
 
-            if i % max(args.num // 2, 1) == 0:
+            if i % log_interval == 0:
                 logger.info(
                     f'Iters: {iter_num}/{total_iters}, LR: {lr:.7f}, Total loss: {loss_meter.avg:.3f}, '
                     f'sup: {sup_meter.avg:.3f}, unsup: {unsup_meter.avg:.3f}, '
-                    f'reco: {reco_meter.avg:.3f}, revisit: {revisit_meter.avg:.3f}, l_q: {loss_q.item():.3f}'
+                    f'ot: {ot_meter.avg:.3f}, proto: {proto_meter.avg:.3f}, '
+                    f'revisit: {revisit_meter.avg:.3f}, l_q: {loss_q.item():.3f}'
                 )
 
         if iter_num >= total_iters * 0.3 and epoch % 2 == 0:
@@ -764,6 +928,9 @@ def main(args, cfg, save_path, cp_path):
             'optimizer': optimizer.state_dict(),
             'random_pool': random_pool.detach().cpu(),
             'random_pool_ptr': random_pool_ptr.detach().cpu(),
+            'class_prototypes': class_prototypes.detach().cpu(),
+            'prototype_mask': prototype_mask.detach().cpu(),
+            'target_prior': target_prior.detach().cpu(),
             'epoch': epoch,
             'previous_best': pre_best_dice,
             'previous_best_ema': pre_best_dice_ema,
