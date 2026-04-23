@@ -1,3 +1,4 @@
+# 计算当前状态（有标签数据）：对于有标签数据集 $\mathcal{D}_L$ 中的当前 Batch，对于任意给定的真实类别（Ground Truth） $i \in \{0, 1, ..., C-1\}$，我们提取所有属于类别 $i$ 的像素的集合 $\Omega_i$。计算网络对这些像素输出的平均概率分布向量 $v_i \in \mathbb{R}^C$：$$v_{i, j} = \frac{1}{|\Omega_i|} \sum_{x \in \Omega_i} P(y=j | x)$$其中 $P(y=j | x)$ 是模型（通常是 Teacher/EMA 模型）输出的 Softmax 概率。EMA 记录趋势：在每个 Step，利用 EMA 将 $v_i$ 融入矩阵 $M$ 的第 $i$ 行：$$M_{i}^{(t)} = \alpha \cdot M_{i}^{(t-1)} + (1 - \alpha) \cdot v_i$$注：此时 $M_i^{(t)}$ 完美记录了你所说的趋势。例如，如果 $i$ 代表类别 A，在初期 $M_i$ 可能是 $[0.8, 0.1, 0.1]$（趋近背景）；到了中期，因为边界模糊，它变成了 $[0.05, 0.75, 0.20]$（逐渐趋近A，但保留 20% 类别 B 的语义）。对齐无标签数据（知识迁移）：对于无标签像素 $u$，假设我们通过最佳阈值 $\tau$ 或 Sinkhorn 算法赋予了它一个伪标签 $\hat{y}_u = c$。我们不再使用 One-hot 向量作为它的学习目标，而是使用矩阵 $M$ 的第 $c$ 行作为其软标签（Soft Target）：$$P_{target}(u) = M_{c}^{(t)}$$最后，使用 KL 散度让 Student 模型输出 $P_S(u)$ 对齐这个带有历史趋势的软标签
 import os
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'

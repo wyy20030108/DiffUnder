@@ -20,7 +20,7 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import yaml
 from torch import nn
-from torch.optim import SGD
+from torch.optim import SGD, AdamW
 from torch.utils.data import ConcatDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -515,7 +515,8 @@ def main(args, cfg, save_path, cp_path):
     q_representation = RepresentationHead(feature_dim_sum, feature_dim_sum).cuda()
 
     params = list(model.parameters()) + list(q_feature_extractor.parameters()) + list(q_representation.parameters())
-    optimizer = SGD(params=params, lr=cfg['lr'], weight_decay=1e-4, momentum=0.9, nesterov=True)
+    # optimizer = SGD(params=params, lr=cfg['lr'], weight_decay=1e-4, momentum=0.9, nesterov=True)
+    optimizer = AdamW(params=model.parameters(), lr=cfg['lr'], betas=(0.9, 0.999), weight_decay=0.01)
 
     criterion_l = nn.CrossEntropyLoss(ignore_index=255).cuda()
     diceloss = DiceLoss(cfg['nclass']).cuda()

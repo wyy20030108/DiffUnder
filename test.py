@@ -25,7 +25,7 @@ def get_parser():
     parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--split', type=str, default='test', choices=['test'])
     parser.add_argument('--save_model_path', type=str, required=True)
-    parser.add_argument('--use_ema', action='store_true', default=False)
+    parser.add_argument('--use_ema', action='store_true', default=True)
     parser.add_argument('--nclass', type=int, default=4)
     return parser
 
