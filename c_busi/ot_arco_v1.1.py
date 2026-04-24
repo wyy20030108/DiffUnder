@@ -101,11 +101,14 @@ def get_parser(defaults):
     parser.add_argument('--ot_weight', type=float, default=0.5)
     parser.add_argument('--sinkhorn_eps', type=float, default=0.5)
     parser.add_argument('--sinkhorn_iters', type=int, default=5)
+    parser.add_argument('--sinkhorn_relax', type=float, default=10.0)
     parser.add_argument('--class_prior', type=str, default=None)
     parser.add_argument('--prior_momentum', type=float, default=0.99)
     parser.add_argument('--prototype_momentum', type=float, default=0.99)
     parser.add_argument('--prototype_threshold', type=float, default=0.8)
     parser.add_argument('--prototype_temperature', type=float, default=0.5)
+    parser.add_argument('--num_prototypes_per_class', type=int, default=4)
+    parser.add_argument('--rampup_epochs', type=float, default=40.0)
     return parser
 
 
@@ -348,8 +351,16 @@ def update_running_prior(running_prior, labels, num_classes, momentum):
     running_prior.copy_(normalize_distribution(running_prior))
 
 
+def gaussian_rampup(current, rampup_length):
+    if rampup_length <= 0:
+        return 1.0
+    current = float(np.clip(current, 0.0, rampup_length))
+    phase = 1.0 - current / rampup_length
+    return math.exp(-5.0 * phase * phase)
+
+
 @torch.no_grad()
-def sinkhorn_align_distribution(prob_map, valid_mask, target_prior, eps=0.5, num_iters=5):
+def sinkhorn_align_distribution(prob_map, valid_mask, target_prior, eps=0.5, num_iters=5, relax=10.0):
     batch_size, num_classes, height, width = prob_map.shape
     flat_prob = prob_map.permute(0, 2, 3, 1).reshape(-1, num_classes)
     flat_valid = valid_mask.reshape(-1).bool()
@@ -360,10 +371,14 @@ def sinkhorn_align_distribution(prob_map, valid_mask, target_prior, eps=0.5, num
     kernel = torch.exp(torch.log(prob_valid.clamp_min(1e-6)) / max(eps, 1e-3)).clamp_min(1e-8)
     row_prior = torch.full((kernel.shape[0],), 1.0 / max(kernel.shape[0], 1), device=kernel.device, dtype=kernel.dtype)
     col_prior = normalize_distribution(target_prior.to(kernel.device, kernel.dtype))
+    relax = max(float(relax), 1e-3)
+    relax_power = relax / (relax + max(float(eps), 1e-3))
     transport = kernel
     for _ in range(num_iters):
-        transport = transport * (row_prior / transport.sum(dim=1).clamp_min(1e-8)).unsqueeze(1)
-        transport = transport * (col_prior / transport.sum(dim=0).clamp_min(1e-8)).unsqueeze(0)
+        row_scale = (row_prior / transport.sum(dim=1).clamp_min(1e-8)).pow(relax_power).unsqueeze(1)
+        col_scale = (col_prior / transport.sum(dim=0).clamp_min(1e-8)).pow(relax_power).unsqueeze(0)
+        transport = transport * row_scale
+        transport = transport * col_scale
     transport = transport / transport.sum(dim=1, keepdim=True).clamp_min(1e-8)
 
     aligned = flat_prob.clone()
@@ -378,21 +393,41 @@ def compute_distribution_alignment_loss(logits, soft_target, valid_mask):
 
 
 @torch.no_grad()
-def update_ema_prototypes(prototypes, prototype_mask, features, labels, valid_mask, momentum):
+def update_ema_prototypes(
+    prototypes,
+    prototype_mask,
+    features,
+    labels,
+    valid_mask,
+    momentum,
+    num_prototypes_per_class=4,
+    assignment_temp=0.5,
+):
     feature_map = F.normalize(features.permute(0, 2, 3, 1), dim=-1)
     valid_mask = valid_mask.bool()
     for cls_idx in range(prototypes.shape[0]):
         cls_mask = valid_mask & (labels == cls_idx)
         if not cls_mask.any():
             continue
-        batch_proto = feature_map[cls_mask].mean(dim=0)
-        batch_proto = F.normalize(batch_proto.unsqueeze(0), dim=1).squeeze(0)
-        if prototype_mask[cls_idx]:
-            updated = momentum * prototypes[cls_idx] + (1 - momentum) * batch_proto
-            prototypes[cls_idx] = F.normalize(updated.unsqueeze(0), dim=1).squeeze(0)
-        else:
-            prototypes[cls_idx] = batch_proto
-            prototype_mask[cls_idx] = True
+        cls_features = feature_map[cls_mask]
+        max_proto = min(prototypes.shape[1], 1 if cls_idx == 0 else max(1, num_prototypes_per_class))
+
+        if not prototype_mask[cls_idx, :max_proto].any():
+            init_idx = torch.randint(cls_features.shape[0], (max_proto,), device=cls_features.device)
+            init_proto = F.normalize(cls_features[init_idx], dim=1)
+            prototypes[cls_idx, :max_proto] = init_proto
+            prototype_mask[cls_idx, :max_proto] = True
+            continue
+
+        active_idx = torch.nonzero(prototype_mask[cls_idx, :max_proto], as_tuple=False).flatten()
+        cls_proto = F.normalize(prototypes[cls_idx, active_idx], dim=1)
+        assign_logits = torch.matmul(cls_features, cls_proto.t()) / max(assignment_temp, 1e-3)
+        assign_weights = torch.softmax(assign_logits, dim=1)
+        proto_mass = assign_weights.sum(dim=0, keepdim=True).t().clamp_min(1e-6)
+        batch_proto = torch.matmul(assign_weights.t(), cls_features) / proto_mass
+        batch_proto = F.normalize(batch_proto, dim=1)
+        updated = momentum * prototypes[cls_idx, active_idx] + (1 - momentum) * batch_proto
+        prototypes[cls_idx, active_idx] = F.normalize(updated, dim=1)
 
 
 def compute_prototype_contrastive_loss(
@@ -407,13 +442,14 @@ def compute_prototype_contrastive_loss(
     num_queries=256,
     temp=0.5,
 ):
-    available_classes = torch.nonzero(prototype_mask, as_tuple=False).flatten()
-    if available_classes.numel() <= 1:
+    available_proto = torch.nonzero(prototype_mask, as_tuple=False)
+    if available_proto.shape[0] <= 1:
         return rep_l.sum() * 0.0
 
     sample_fn = {'asmc': grid_as_monte_carlo_sample, 'smc': grid_monte_carlo_sample}.get(func, monte_carlo_sample)
-    proto_bank = F.normalize(prototypes[available_classes], dim=1)
-    class_to_bank_idx = {int(cls.item()): idx for idx, cls in enumerate(available_classes)}
+    proto_bank = F.normalize(prototypes[available_proto[:, 0], available_proto[:, 1]], dim=1)
+    bank_classes = available_proto[:, 0]
+    available_classes = torch.unique(bank_classes)
 
     feature_l = F.normalize(rep_l.permute(0, 2, 3, 1), dim=-1)
     feature_u = F.normalize(rep_u.permute(0, 2, 3, 1), dim=-1)
@@ -437,8 +473,14 @@ def compute_prototype_contrastive_loss(
         sample_idx = sample_fn(cls_features.shape[0], sample_count).to(cls_features.device)
         anchor_features = cls_features[sample_idx]
         logits = torch.matmul(anchor_features, proto_bank.t()) / temp
-        targets = torch.full((sample_count,), class_to_bank_idx[cls_idx], dtype=torch.long, device=anchor_features.device)
-        losses.append(F.cross_entropy(logits, targets))
+        positive_mask = bank_classes == cls_idx
+        if positive_mask.sum() == 0:
+            continue
+        with torch.no_grad():
+            soft_targets = torch.softmax(logits[:, positive_mask], dim=1)
+            full_targets = torch.zeros_like(logits)
+            full_targets[:, positive_mask] = soft_targets
+        losses.append((-(full_targets * F.log_softmax(logits, dim=1)).sum(dim=1)).mean())
 
     if not losses:
         return rep_l.sum() * 0.0
@@ -613,8 +655,16 @@ def main(args, cfg, save_path, cp_path):
 
     random_pool = F.normalize(torch.randn(args.K, feature_dim_sum, device='cuda'), dim=1)
     random_pool_ptr = torch.zeros(1, dtype=torch.long, device='cuda')
-    class_prototypes = torch.zeros((cfg['nclass'], feature_dim_sum), dtype=torch.float32, device='cuda')
-    prototype_mask = torch.zeros(cfg['nclass'], dtype=torch.bool, device='cuda')
+    class_prototypes = torch.zeros(
+        (cfg['nclass'], max(1, args.num_prototypes_per_class), feature_dim_sum),
+        dtype=torch.float32,
+        device='cuda',
+    )
+    prototype_mask = torch.zeros(
+        (cfg['nclass'], max(1, args.num_prototypes_per_class)),
+        dtype=torch.bool,
+        device='cuda',
+    )
     target_prior, use_fixed_prior = build_target_prior(args, cfg, cfg['nclass'], class_prototypes.device)
 
     pre_best_dice = 0.0
@@ -638,9 +688,19 @@ def main(args, cfg, save_path, cp_path):
         if 'random_pool_ptr' in checkpoint:
             random_pool_ptr.copy_(checkpoint['random_pool_ptr'].cuda())
         if 'class_prototypes' in checkpoint:
-            class_prototypes.copy_(checkpoint['class_prototypes'].cuda())
+            ckpt_prototypes = checkpoint['class_prototypes'].cuda()
+            if ckpt_prototypes.dim() == 2:
+                class_prototypes[:, 0].copy_(ckpt_prototypes)
+            else:
+                copy_proto = min(class_prototypes.shape[1], ckpt_prototypes.shape[1])
+                class_prototypes[:, :copy_proto].copy_(ckpt_prototypes[:, :copy_proto])
         if 'prototype_mask' in checkpoint:
-            prototype_mask.copy_(checkpoint['prototype_mask'].cuda())
+            ckpt_mask = checkpoint['prototype_mask'].cuda()
+            if ckpt_mask.dim() == 1:
+                prototype_mask[:, 0].copy_(ckpt_mask)
+            else:
+                copy_proto = min(prototype_mask.shape[1], ckpt_mask.shape[1])
+                prototype_mask[:, :copy_proto].copy_(ckpt_mask[:, :copy_proto])
         if 'target_prior' in checkpoint:
             target_prior.copy_(checkpoint['target_prior'].cuda())
         epoch = checkpoint['epoch']
@@ -679,6 +739,11 @@ def main(args, cfg, save_path, cp_path):
         q_representation.train()
 
         for i, (labeled_data, unlabeled_data) in enumerate(trainloader):
+            current_epoch = epoch + float(i) / max(len(trainloader), 1)
+            ssl_rampup = gaussian_rampup(current_epoch, args.rampup_epochs)
+            current_ot_weight = args.ot_weight * ssl_rampup
+            current_reco_weight = args.reco_weight * ssl_rampup
+
             img_x, mask_x = labeled_data
             img_x = img_x.cuda(non_blocking=True)
             mask_x = mask_x.cuda(non_blocking=True)
@@ -743,6 +808,7 @@ def main(args, cfg, save_path, cp_path):
                     target_prior,
                     eps=args.sinkhorn_eps,
                     num_iters=args.sinkhorn_iters,
+                    relax=args.sinkhorn_relax,
                 )
                 aligned_conf_u, aligned_label_u = torch.max(aligned_prob_u, dim=1)
                 prototype_valid_u = valid_u_mask & aligned_conf_u.ge(args.prototype_threshold)
@@ -754,6 +820,8 @@ def main(args, cfg, save_path, cp_path):
                     torch.cat((mask_x, aligned_label_u), dim=0),
                     torch.cat((labeled_valid, prototype_valid_u), dim=0),
                     args.prototype_momentum,
+                    num_prototypes_per_class=args.num_prototypes_per_class,
+                    assignment_temp=args.prototype_temperature,
                 )
 
             ot_loss = compute_distribution_alignment_loss(pred_u, aligned_prob_u, valid_u_mask)
@@ -776,8 +844,8 @@ def main(args, cfg, save_path, cp_path):
             loss = (
                 supervised_loss
                 + args.unsup_weight * unsup_loss
-                + args.ot_weight * ot_loss
-                + args.reco_weight * proto_loss
+                + current_ot_weight * ot_loss
+                + current_reco_weight * proto_loss
                 + args.revisit_weight * loss_q
             )
 
@@ -810,6 +878,9 @@ def main(args, cfg, save_path, cp_path):
             writer.add_scalar('train/loss_ot', ot_loss.item(), iters)
             writer.add_scalar('train/loss_proto', proto_loss.item(), iters)
             writer.add_scalar('train/loss_revisit', loss_q.item(), iters)
+            writer.add_scalar('train/ssl_rampup', ssl_rampup, iters)
+            writer.add_scalar('train/weight_ot', current_ot_weight, iters)
+            writer.add_scalar('train/weight_reco', current_reco_weight, iters)
             writer.add_scalar('train/pseudo_fg_ratio', (train_u_aug_label > 0).float().mean().item(), iters)
             writer.add_scalar('train/pseudo_conf_ratio', train_u_aug_logits.ge(args.strong_threshold).float().mean().item(), iters)
             writer.add_scalar('train/prior_fg_ratio', target_prior[1:].sum().item(), iters)
@@ -819,7 +890,8 @@ def main(args, cfg, save_path, cp_path):
                     f'Iters: {iter_num}/{total_iters}, LR: {lr:.7f}, Total loss: {loss_meter.avg:.3f}, '
                     f'sup: {sup_meter.avg:.3f}, unsup: {unsup_meter.avg:.3f}, '
                     f'ot: {ot_meter.avg:.3f}, proto: {proto_meter.avg:.3f}, '
-                    f'revisit: {revisit_meter.avg:.3f}, l_q: {loss_q.item():.3f}'
+                    f'revisit: {revisit_meter.avg:.3f}, l_q: {loss_q.item():.3f}, '
+                    f'ot_w: {current_ot_weight:.3f}, reco_w: {current_reco_weight:.4f}'
                 )
 
         if iter_num >= total_iters * 0.3 and epoch % 2 == 0:

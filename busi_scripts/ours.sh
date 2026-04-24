@@ -1,8 +1,8 @@
 #!/bin/bash
-GPUID=4
+GPUID=3
 
-CUDA_VISIBLE_DEVICES=$GPUID python c_busi/ot_arco_busi.py \
+CUDA_VISIBLE_DEVICES=$GPUID python c_busi/ot_arco_v1.1.py \
  --cli_dataset "8busi" \
  --seed 2026 \
- --exp "ARCO_OT" \
+ --exp "ARCO-UOT" \
  --device "cuda:$GPUID"
