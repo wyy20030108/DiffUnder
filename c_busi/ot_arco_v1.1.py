@@ -102,13 +102,18 @@ def get_parser(defaults):
     parser.add_argument('--sinkhorn_eps', type=float, default=0.5)
     parser.add_argument('--sinkhorn_iters', type=int, default=5)
     parser.add_argument('--sinkhorn_relax', type=float, default=10.0)
+    parser.add_argument('--sinkhorn_relax_min', type=float, default=0.1)
+    parser.add_argument('--sinkhorn_fg_prob_threshold', type=float, default=0.05)
     parser.add_argument('--class_prior', type=str, default=None)
+    parser.add_argument('--use_fixed_prior', type=str2bool, default=None)
     parser.add_argument('--prior_momentum', type=float, default=0.99)
     parser.add_argument('--prototype_momentum', type=float, default=0.99)
     parser.add_argument('--prototype_threshold', type=float, default=0.8)
+    parser.add_argument('--prototype_min_threshold', type=float, default=0.5)
     parser.add_argument('--prototype_temperature', type=float, default=0.5)
     parser.add_argument('--num_prototypes_per_class', type=int, default=4)
     parser.add_argument('--rampup_epochs', type=float, default=40.0)
+    parser.add_argument('--sharpen_temperature', type=float, default=0.5)
     return parser
 
 
@@ -232,11 +237,12 @@ def enqueue_memobank(keys, queue, queue_ptr, queue_size):
 
 def generate_cutout_mask(img_size, ratio=2):
     cutout_area = img_size[0] * img_size[1] / ratio
-    w = np.random.randint(img_size[1] / ratio + 1, img_size[1] + 1)
-    h = int(np.round(cutout_area / w))
+    min_w = max(1, int(img_size[1] / ratio) + 1)
+    w = int(torch.randint(min_w, img_size[1] + 1, (1,)).item())
+    h = int(round(cutout_area / max(w, 1)))
     h = max(1, min(h, img_size[0]))
-    x_start = np.random.randint(0, img_size[1] - w + 1)
-    y_start = np.random.randint(0, img_size[0] - h + 1)
+    x_start = int(torch.randint(0, img_size[1] - w + 1, (1,)).item())
+    y_start = int(torch.randint(0, img_size[0] - h + 1, (1,)).item())
     x_end = int(x_start + w)
     y_end = int(y_start + h)
     mask = torch.ones(img_size, dtype=torch.float32)
@@ -289,6 +295,55 @@ def generate_unsup_data(data, target, logits, mode='cutmix'):
     return torch.cat(new_data), torch.cat(new_target).long(), torch.cat(new_logits)
 
 
+def _expand_spatial_mask(mask, tensor):
+    while mask.dim() < tensor.dim():
+        mask = mask.unsqueeze(0)
+    return mask
+
+
+def _apply_unsup_aug_tensor(tensor, paired_tensor, mix_mask, mode, fill_value):
+    mix_mask = _expand_spatial_mask(mix_mask.bool(), tensor)
+    if mode == 'cutout':
+        fill_tensor = torch.full_like(tensor, fill_value)
+        return torch.where(mix_mask, tensor, fill_tensor)
+    return torch.where(mix_mask, tensor, paired_tensor)
+
+
+def generate_unsup_data_with_soft_targets(data, target, logits, soft_target, ignore_mask, mode='cutmix'):
+    if mode == 'none':
+        return data, target.long(), logits, soft_target, ignore_mask
+
+    batch_size, _, im_h, im_w = data.shape
+    device = data.device
+    new_data, new_target, new_logits = [], [], []
+    new_soft_target, new_ignore_mask = [], []
+
+    for i in range(batch_size):
+        if mode == 'cutout':
+            mix_mask = generate_cutout_mask([im_h, im_w], ratio=2).to(device)
+        elif mode == 'cutmix':
+            mix_mask = generate_cutout_mask([im_h, im_w]).to(device)
+        elif mode == 'classmix':
+            mix_mask = generate_class_mask(target[i]).to(device)
+        else:
+            mix_mask = torch.ones((im_h, im_w), device=device)
+
+        pair_index = (i + 1) % batch_size
+        new_data.append(_apply_unsup_aug_tensor(data[i], data[pair_index], mix_mask, mode, 0.0).unsqueeze(0))
+        new_target.append(_apply_unsup_aug_tensor(target[i], target[pair_index], mix_mask, mode, -1).unsqueeze(0))
+        new_logits.append(_apply_unsup_aug_tensor(logits[i], logits[pair_index], mix_mask, mode, 0.0).unsqueeze(0))
+        new_soft_target.append(_apply_unsup_aug_tensor(soft_target[i], soft_target[pair_index], mix_mask, mode, 0.0).unsqueeze(0))
+        new_ignore_mask.append(_apply_unsup_aug_tensor(ignore_mask[i], ignore_mask[pair_index], mix_mask, mode, 255).unsqueeze(0))
+
+    return (
+        torch.cat(new_data),
+        torch.cat(new_target).long(),
+        torch.cat(new_logits),
+        torch.cat(new_soft_target),
+        torch.cat(new_ignore_mask).long(),
+    )
+
+
 def label_onehot(inputs, num_segments):
     batch_size, im_h, im_w = inputs.shape
     outputs = torch.zeros((batch_size, num_segments, im_h, im_w), device=inputs.device, dtype=torch.float32)
@@ -310,6 +365,12 @@ def percentile_threshold(values, percentile, default_value):
 def normalize_distribution(distribution):
     distribution = distribution.float().clamp_min(1e-8)
     return distribution / distribution.sum().clamp_min(1e-8)
+
+
+def sharpen_probability_map(prob_map, temperature=0.5):
+    temperature = max(float(temperature), 1e-3)
+    sharpened = prob_map.clamp_min(1e-8).pow(1.0 / temperature)
+    return sharpened / sharpened.sum(dim=1, keepdim=True).clamp_min(1e-8)
 
 
 def parse_class_prior(prior_source, num_classes):
@@ -334,10 +395,11 @@ def parse_class_prior(prior_source, num_classes):
 
 def build_target_prior(args, cfg, num_classes, device):
     prior_source = args.class_prior if args.class_prior is not None else cfg.get('class_prior')
+    use_fixed_prior = args.use_fixed_prior if args.use_fixed_prior is not None else cfg.get('use_fixed_prior')
     if prior_source is None:
-        return torch.full((num_classes,), 1.0 / num_classes, device=device), False
+        return torch.full((num_classes,), 1.0 / num_classes, device=device), bool(use_fixed_prior) if use_fixed_prior is not None else False
     prior = parse_class_prior(prior_source, num_classes).to(device)
-    return prior, True
+    return prior, True if use_fixed_prior is None else bool(use_fixed_prior)
 
 
 @torch.no_grad()
@@ -386,10 +448,44 @@ def sinkhorn_align_distribution(prob_map, valid_mask, target_prior, eps=0.5, num
     return aligned.view(batch_size, height, width, num_classes).permute(0, 3, 1, 2)
 
 
+@torch.no_grad()
+def compute_adaptive_sinkhorn_relax(prob_map, valid_mask, base_relax, min_relax=0.1, fg_prob_threshold=0.05):
+    base_relax = max(float(base_relax), 1e-3)
+    min_relax = min(base_relax, max(float(min_relax), 1e-3))
+    if prob_map.shape[1] <= 1:
+        return base_relax
+
+    flat_valid = valid_mask.reshape(-1).bool()
+    if flat_valid.sum() == 0:
+        return min_relax
+
+    fg_prob = prob_map[:, 1:].sum(dim=1).reshape(-1)[flat_valid].mean().item()
+    threshold = max(float(fg_prob_threshold), 1e-6)
+    relax_ratio = min(max(fg_prob / threshold, 0.0), 1.0)
+    return min_relax + (base_relax - min_relax) * relax_ratio
+
+
 def compute_distribution_alignment_loss(logits, soft_target, valid_mask):
     per_pixel = -(soft_target * F.log_softmax(logits, dim=1)).sum(dim=1)
     valid = valid_mask.float()
     return (per_pixel * valid).sum() / valid.sum().clamp_min(1.0)
+
+
+@torch.no_grad()
+def build_classwise_prototype_mask(confidence_map, label_map, valid_mask, relative_ratio=0.8, min_threshold=0.5):
+    prototype_valid = torch.zeros_like(valid_mask, dtype=torch.bool)
+    valid_mask = valid_mask.bool()
+    if not valid_mask.any():
+        return prototype_valid
+
+    for cls_idx in torch.unique(label_map[valid_mask]).tolist():
+        cls_mask = valid_mask & (label_map == cls_idx)
+        cls_conf = confidence_map[cls_mask]
+        if cls_conf.numel() == 0:
+            continue
+        cls_threshold = max(float(min_threshold), cls_conf.max().item() * float(relative_ratio))
+        prototype_valid |= cls_mask & confidence_map.ge(cls_threshold)
+    return prototype_valid
 
 
 @torch.no_grad()
@@ -470,7 +566,7 @@ def compute_prototype_contrastive_loss(
 
         cls_features = torch.cat(feature_list, dim=0)
         sample_count = min(num_queries, cls_features.shape[0])
-        sample_idx = sample_fn(cls_features.shape[0], sample_count).to(cls_features.device)
+        sample_idx = sample_fn(cls_features.shape[0], sample_count, device=cls_features.device)
         anchor_features = cls_features[sample_idx]
         logits = torch.matmul(anchor_features, proto_bank.t()) / temp
         positive_mask = bank_classes == cls_idx
@@ -492,30 +588,34 @@ def get_revisiting_loss(random_pool, rep_u, rep_u_teacher, topk=5):
     rep_u = F.normalize(rep_u, dim=-1)
     rep_u_teacher = F.adaptive_avg_pool2d(rep_u_teacher, 1).flatten(1)
     rep_u_teacher = F.normalize(rep_u_teacher, dim=-1)
-    dist_t = 2 - 2 * torch.einsum('bc,kc->bk', rep_u, random_pool)
-    dist_q = 2 - 2 * torch.einsum('bc,kc->bk', rep_u_teacher, random_pool)
+    dist_student = 2 - 2 * torch.einsum('bc,kc->bk', rep_u, random_pool)
+    dist_teacher = 2 - 2 * torch.einsum('bc,kc->bk', rep_u_teacher, random_pool)
     topk = min(topk, random_pool.shape[0])
-    _, nn_index = dist_t.topk(topk, dim=1, largest=False)
-    nn_dist_q = torch.gather(dist_q, 1, nn_index)
-    return (nn_dist_q.sum(dim=1) / topk).mean(), rep_u_teacher.detach()
+    if topk <= 0:
+        return rep_u.sum() * 0.0, rep_u_teacher.detach()
+    _, nn_index = dist_teacher.topk(topk, dim=1, largest=False)
+    nn_dist_student = torch.gather(dist_student, 1, nn_index)
+    return (nn_dist_student.sum(dim=1) / topk).mean(), rep_u_teacher.detach()
 
 
-def monte_carlo_sample(high, shape):
+def monte_carlo_sample(high, shape, device=None):
+    device = torch.device('cpu') if device is None else device
     if high <= 0:
-        return torch.zeros((shape,), dtype=torch.long)
-    return torch.randint(high, size=(shape,), dtype=torch.long)
+        return torch.zeros((shape,), dtype=torch.long, device=device)
+    return torch.randint(high, size=(shape,), dtype=torch.long, device=device)
 
 
-def grid_monte_carlo_sample(high, shape, cut_count=4):
+def grid_monte_carlo_sample(high, shape, cut_count=4, device=None):
+    device = torch.device('cpu') if device is None else device
     if high <= 0:
-        return torch.zeros((shape,), dtype=torch.long)
+        return torch.zeros((shape,), dtype=torch.long, device=device)
     try:
         edge = round(math.sqrt(high))
         if edge <= 1:
-            return monte_carlo_sample(high, shape)
+            return monte_carlo_sample(high, shape, device=device)
         samples = []
         per_patch_sample = max(1, shape * edge * edge // max(high, 1) // (cut_count ** 2))
-        img = np.arange(edge * edge).reshape(edge, edge)
+        img = torch.arange(edge * edge, device=device, dtype=torch.long).reshape(edge, edge)
         patch_edge = max(1, edge // cut_count)
         for i in range(cut_count):
             for j in range(cut_count):
@@ -528,29 +628,34 @@ def grid_monte_carlo_sample(high, shape, cut_count=4):
                 else:
                     picked = img[i * patch_edge:, j * patch_edge:]
                 picked = picked.flatten()
-                picked = picked[np.random.permutation(len(picked))]
-                indices = np.random.randint(0, len(picked), size=(per_patch_sample,))
+                if picked.numel() == 0:
+                    continue
+                picked = picked[torch.randperm(picked.numel(), device=device)]
+                indices = torch.randint(0, picked.numel(), size=(per_patch_sample,), device=device)
                 samples.append(picked[indices])
-        sample_tensor = torch.as_tensor(np.concatenate(samples), dtype=torch.long)
+        if not samples:
+            return monte_carlo_sample(high, shape, device=device)
+        sample_tensor = torch.cat(samples, dim=0)
         sample_tensor = sample_tensor[sample_tensor < high]
         if sample_tensor.numel() < shape:
-            pad = torch.randint(high, (shape - sample_tensor.numel(),), dtype=torch.long)
+            pad = torch.randint(high, (shape - sample_tensor.numel(),), dtype=torch.long, device=device)
             sample_tensor = torch.cat((sample_tensor, pad), dim=0)
-        return sample_tensor[torch.randperm(sample_tensor.numel())][:shape]
+        return sample_tensor[torch.randperm(sample_tensor.numel(), device=device)][:shape]
     except Exception:
-        return monte_carlo_sample(high, shape)
+        return monte_carlo_sample(high, shape, device=device)
 
 
-def grid_as_monte_carlo_sample(high, shape, cut_count=4):
+def grid_as_monte_carlo_sample(high, shape, cut_count=4, device=None):
+    device = torch.device('cpu') if device is None else device
     if high <= 0:
-        return torch.zeros((shape,), dtype=torch.long)
+        return torch.zeros((shape,), dtype=torch.long, device=device)
     try:
         edge = round(math.sqrt(high))
         if edge <= 1:
-            return monte_carlo_sample(high, shape)
+            return monte_carlo_sample(high, shape, device=device)
         samples = []
         per_patch_sample = max(2, shape * edge * edge // max(high, 1) // (cut_count ** 2))
-        img = np.arange(edge * edge).reshape(edge, edge)
+        img = torch.arange(edge * edge, device=device, dtype=torch.long).reshape(edge, edge)
         patch_edge = max(1, edge // cut_count)
         for i in range(cut_count):
             for j in range(cut_count):
@@ -563,21 +668,25 @@ def grid_as_monte_carlo_sample(high, shape, cut_count=4):
                 else:
                     picked = img[i * patch_edge:, j * patch_edge:]
                 picked = picked.flatten()
-                picked = picked[np.random.permutation(len(picked))]
-                center = int(2 * np.mean(picked))
+                if picked.numel() == 0:
+                    continue
+                picked = picked[torch.randperm(picked.numel(), device=device)]
+                center = int((2 * picked.float().mean()).item())
                 half = max(1, per_patch_sample // 2)
-                indices = np.random.randint(0, len(picked), size=(half,))
+                indices = torch.randint(0, picked.numel(), size=(half,), device=device)
                 chosen = picked[indices]
                 mirrored = center - chosen
                 samples.extend([chosen, mirrored])
-        sample_tensor = torch.as_tensor(np.concatenate(samples), dtype=torch.long)
+        if not samples:
+            return monte_carlo_sample(high, shape, device=device)
+        sample_tensor = torch.cat(samples, dim=0)
         sample_tensor = sample_tensor[(sample_tensor >= 0) & (sample_tensor < high)]
         if sample_tensor.numel() < shape:
-            pad = torch.randint(high, (shape - sample_tensor.numel(),), dtype=torch.long)
+            pad = torch.randint(high, (shape - sample_tensor.numel(),), dtype=torch.long, device=device)
             sample_tensor = torch.cat((sample_tensor, pad), dim=0)
-        return sample_tensor[torch.randperm(sample_tensor.numel())][:shape]
+        return sample_tensor[torch.randperm(sample_tensor.numel(), device=device)][:shape]
     except Exception:
-        return monte_carlo_sample(high, shape)
+        return monte_carlo_sample(high, shape, device=device)
 
 
 def compute_unsupervised_loss(predict, target, logits, strong_threshold, ignore_mask=None):
@@ -741,7 +850,7 @@ def main(args, cfg, save_path, cp_path):
         for i, (labeled_data, unlabeled_data) in enumerate(trainloader):
             current_epoch = epoch + float(i) / max(len(trainloader), 1)
             ssl_rampup = gaussian_rampup(current_epoch, args.rampup_epochs)
-            current_ot_weight = args.ot_weight * ssl_rampup
+            current_ot_weight = 0.0
             current_reco_weight = args.reco_weight * ssl_rampup
 
             img_x, mask_x = labeled_data
@@ -754,13 +863,34 @@ def main(args, cfg, save_path, cp_path):
             ignore_mask = ignore_mask.cuda(non_blocking=True)
 
             with torch.no_grad():
-                pred_u_teacher_weak, _ = forward_with_features(ema_model, img_w)
+                pred_u_teacher_weak, u_feature_map_teacher_weak = forward_with_features(ema_model, img_w)
+                if not use_fixed_prior:
+                    update_running_prior(target_prior, mask_x, cfg['nclass'], args.prior_momentum)
+
+                weak_valid_u_mask = ignore_mask != 255
                 pseudo_prob_weak = torch.softmax(pred_u_teacher_weak, dim=1)
-                pseudo_logits, pseudo_u = torch.max(pseudo_prob_weak, dim=1)
-                train_u_aug_data, train_u_aug_label, train_u_aug_logits = generate_unsup_data(
+                adaptive_relax = compute_adaptive_sinkhorn_relax(
+                    prob_map=pseudo_prob_weak.detach(),
+                    valid_mask=weak_valid_u_mask,
+                    base_relax=args.sinkhorn_relax,
+                    min_relax=args.sinkhorn_relax_min,
+                    fg_prob_threshold=args.sinkhorn_fg_prob_threshold,
+                )
+                aligned_prob_u_weak = sinkhorn_align_distribution(
+                    pseudo_prob_weak.detach(),
+                    weak_valid_u_mask,
+                    target_prior,
+                    eps=args.sinkhorn_eps,
+                    num_iters=args.sinkhorn_iters,
+                    relax=adaptive_relax,
+                )
+                aligned_conf_u_weak, aligned_label_u_weak = torch.max(aligned_prob_u_weak, dim=1)
+                train_u_aug_data, train_u_aug_label, train_u_aug_logits, train_u_aug_soft_label, train_u_aug_ignore_mask = generate_unsup_data_with_soft_targets(
                     img_s,
-                    pseudo_u.clone(),
-                    pseudo_logits.clone(),
+                    aligned_label_u_weak.clone(),
+                    aligned_conf_u_weak.clone(),
+                    aligned_prob_u_weak.clone(),
+                    ignore_mask.clone(),
                     mode=args.apply_aug,
                 )
 
@@ -769,12 +899,11 @@ def main(args, cfg, save_path, cp_path):
 
             with torch.no_grad():
                 pred_l_teacher, l_feature_map_teacher = forward_with_features(ema_model, img_x)
-                pred_u_teacher, u_feature_map_teacher = forward_with_features(ema_model, train_u_aug_data)
 
             l_feature_all = q_feature_extractor(l_feature_map)
             u_feature_all = q_feature_extractor(u_feature_map)
             l_feature_all_teacher = k_feature_extractor(l_feature_map_teacher)
-            u_feature_all_teacher = k_feature_extractor(u_feature_map_teacher)
+            u_feature_all_teacher = k_feature_extractor(u_feature_map_teacher_weak)
 
             rep_l = q_representation(l_feature_all)
             rep_u = q_representation(u_feature_all)
@@ -785,51 +914,54 @@ def main(args, cfg, save_path, cp_path):
             loss_dice = diceloss(pred_l, mask_x)
             supervised_loss = loss_ce + loss_dice
 
-            train_u_aug_ignore_mask = ignore_mask
-            valid_u_mask = (train_u_aug_label >= 0) & (train_u_aug_ignore_mask != 255)
-            unsup_loss = compute_unsupervised_loss(
+            train_u_aug_soft_label = sharpen_probability_map(
+                train_u_aug_soft_label.detach(),
+                temperature=args.sharpen_temperature,
+            )
+            valid_u_mask = (
+                (train_u_aug_label >= 0)
+                & (train_u_aug_ignore_mask != 255)
+                & train_u_aug_logits.ge(args.strong_threshold)
+            )
+            unsup_loss = compute_distribution_alignment_loss(
                 pred_u,
-                train_u_aug_label,
-                train_u_aug_logits,
-                args.strong_threshold,
-                ignore_mask=train_u_aug_ignore_mask,
+                train_u_aug_soft_label,
+                valid_u_mask,
             )
 
             with torch.no_grad():
-                if not use_fixed_prior:
-                    update_running_prior(target_prior, mask_x, cfg['nclass'], args.prior_momentum)
-
-                prob_l_teacher = torch.softmax(pred_l_teacher, dim=1)
-                prob_u_teacher = torch.softmax(pred_u_teacher, dim=1)
-
-                aligned_prob_u = sinkhorn_align_distribution(
-                    prob_u_teacher.detach(),
-                    valid_u_mask,
-                    target_prior,
-                    eps=args.sinkhorn_eps,
-                    num_iters=args.sinkhorn_iters,
-                    relax=args.sinkhorn_relax,
+                prototype_valid_u_weak = build_classwise_prototype_mask(
+                    aligned_conf_u_weak,
+                    aligned_label_u_weak,
+                    weak_valid_u_mask,
+                    relative_ratio=args.prototype_threshold,
+                    min_threshold=args.prototype_min_threshold,
                 )
-                aligned_conf_u, aligned_label_u = torch.max(aligned_prob_u, dim=1)
-                prototype_valid_u = valid_u_mask & aligned_conf_u.ge(args.prototype_threshold)
+                prototype_valid_u = build_classwise_prototype_mask(
+                    train_u_aug_logits,
+                    train_u_aug_label,
+                    valid_u_mask,
+                    relative_ratio=args.prototype_threshold,
+                    min_threshold=args.prototype_min_threshold,
+                )
                 labeled_valid = torch.ones_like(mask_x, dtype=torch.bool)
                 update_ema_prototypes(
                     class_prototypes,
                     prototype_mask,
                     torch.cat((rep_l_teacher, rep_u_teacher), dim=0).detach(),
-                    torch.cat((mask_x, aligned_label_u), dim=0),
-                    torch.cat((labeled_valid, prototype_valid_u), dim=0),
+                    torch.cat((mask_x, aligned_label_u_weak), dim=0),
+                    torch.cat((labeled_valid, prototype_valid_u_weak), dim=0),
                     args.prototype_momentum,
                     num_prototypes_per_class=args.num_prototypes_per_class,
                     assignment_temp=args.prototype_temperature,
                 )
 
-            ot_loss = compute_distribution_alignment_loss(pred_u, aligned_prob_u, valid_u_mask)
+            ot_loss = pred_u.new_tensor(0.0)
             proto_loss = compute_prototype_contrastive_loss(
                 rep_l=rep_l,
                 mask_l=mask_x,
                 rep_u=rep_u,
-                pseudo_u=aligned_label_u,
+                pseudo_u=train_u_aug_label,
                 valid_u_mask=prototype_valid_u,
                 prototypes=class_prototypes.detach(),
                 prototype_mask=prototype_mask.detach(),
@@ -839,12 +971,10 @@ def main(args, cfg, save_path, cp_path):
             )
 
             loss_q, pooled_rep_u_teacher = get_revisiting_loss(random_pool, rep_u, rep_u_teacher, topk=args.topk)
-            dequeue_and_enqueue(pooled_rep_u_teacher, random_pool, random_pool_ptr)
 
             loss = (
                 supervised_loss
                 + args.unsup_weight * unsup_loss
-                + current_ot_weight * ot_loss
                 + current_reco_weight * proto_loss
                 + args.revisit_weight * loss_q
             )
@@ -852,6 +982,7 @@ def main(args, cfg, save_path, cp_path):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            dequeue_and_enqueue(pooled_rep_u_teacher, random_pool, random_pool_ptr)
 
             iter_num += 1
             update_ema_variables(model, ema_model, args.ema_decay, iter_num)
@@ -883,7 +1014,9 @@ def main(args, cfg, save_path, cp_path):
             writer.add_scalar('train/weight_reco', current_reco_weight, iters)
             writer.add_scalar('train/pseudo_fg_ratio', (train_u_aug_label > 0).float().mean().item(), iters)
             writer.add_scalar('train/pseudo_conf_ratio', train_u_aug_logits.ge(args.strong_threshold).float().mean().item(), iters)
+            writer.add_scalar('train/pseudo_conf_valid_ratio', valid_u_mask.float().mean().item(), iters)
             writer.add_scalar('train/prior_fg_ratio', target_prior[1:].sum().item(), iters)
+            writer.add_scalar('train/sinkhorn_relax', adaptive_relax, iters)
 
             if i % log_interval == 0:
                 logger.info(
