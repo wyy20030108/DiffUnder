@@ -123,6 +123,8 @@ class AgScoreLabelFilter:
         pos_candidates_dict = {}
         neg_candidates_list = []
         
+        total_pixels = conf_flat.size(0)
+        num_classes = len(unique_classes)
         # 遍历所有类别收集 Top-1% (Positive) 和 Bottom-1% (Negative)
         for k in unique_classes:
             k_mask = (pl_flat == k)
@@ -130,9 +132,10 @@ class AgScoreLabelFilter:
             k_feats = feats_flat[k_mask]
             
             num_k_pixels = k_confs.size(0)
-            k_count = max(1, int(num_k_pixels * 0.01)) # 1% 的阈值数量
+            k_count_base = max(1, int(num_k_pixels * 0.01)) # 1% 的阈值数量
             
             sorted_indices = torch.argsort(k_confs)
+            k_count = min(k_count_base, k_confs.size(0))
             # 收集候选
             neg_candidates_list.append(k_feats[sorted_indices[:k_count]])
             pos_candidates_dict[k.item()] = k_feats[sorted_indices[-k_count:]]
