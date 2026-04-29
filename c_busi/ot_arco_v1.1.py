@@ -724,7 +724,7 @@ def main(args, cfg, save_path, cp_path):
     params = list(model.parameters()) + list(q_feature_extractor.parameters()) + list(q_representation.parameters())
     # optimizer = SGD(params=params, lr=cfg['lr'], weight_decay=1e-4, momentum=0.9, nesterov=True)
     optimizer = AdamW(
-        params=model.parameters(),
+        params=params,
         lr=cfg['lr'],
         betas=(0.9, 0.999),
         weight_decay=0.01,
