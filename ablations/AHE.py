@@ -34,6 +34,86 @@ from utils.util import AverageMeter, DiceLoss, count_params, init_log
 from utils.val import eval_2d
 
 
+ABLATION_SETTINGS = {
+    'A0': {
+        'use_unsup': False,
+        'use_ot': False,
+        'use_proto': False,
+        'use_revisit': False,
+        'description': 'Baseline (Sup Only)',
+    },
+    'A1': {
+        'use_unsup': True,
+        'use_ot': False,
+        'use_proto': False,
+        'use_revisit': False,
+        'description': 'Unsupervised Baseline (TS)',
+    },
+    'A2': {
+        'use_unsup': True,
+        'use_ot': True,
+        'use_proto': False,
+        'use_revisit': False,
+        'description': 'TS + OT Alignment',
+    },
+    'A3': {
+        'use_unsup': True,
+        'use_ot': True,
+        'use_proto': True,
+        'use_revisit': False,
+        'description': 'TS + OT Alignment + Proto Contrast',
+    },
+    'A4': {
+        'use_unsup': True,
+        'use_ot': True,
+        'use_proto': True,
+        'use_revisit': True,
+        'description': 'Full AHE',
+    },
+}
+
+B_SETTINGS = {
+    'B0': {
+        'use_soft_targets': False,
+        'description': 'Argmax hard pseudo labels',
+    },
+    'B1': {
+        'use_soft_targets': True,
+        'description': 'Sinkhorn-aligned soft targets',
+    },
+}
+
+C_SETTINGS = {
+    'C0': {
+        'use_adaptive_relax': False,
+        'description': 'Fixed Relax',
+    },
+    'C1': {
+        'use_adaptive_relax': True,
+        'description': 'Adaptive Relax',
+    },
+}
+
+D_SETTINGS = {
+    'D1': {
+        'sinkhorn_iters': 1,
+        'description': '1 Sinkhorn iteration',
+    },
+    'D2': {
+        'sinkhorn_iters': 3,
+        'description': '3 Sinkhorn iterations',
+    },
+    'D3': {
+        'sinkhorn_iters': 5,
+        'description': '5 Sinkhorn iterations',
+    },
+    'D4': {
+        'sinkhorn_iters': 10,
+        'description': '10 Sinkhorn iterations',
+    },
+}
+
+
 def str2bool(value):
     if isinstance(value, bool):
         return value
@@ -91,6 +171,10 @@ def get_parser(datasetname):
     parser.add_argument('--num_prototypes_per_class', type=int, default=4)
     parser.add_argument('--rampup_epochs', type=float, default=40.0)
     parser.add_argument('--sharpen_temperature', type=float, default=0.5)
+    parser.add_argument('--ablation_mode', type=str, default='A4', choices=sorted(ABLATION_SETTINGS.keys()))
+    parser.add_argument('--b_mode', type=str, default='B1', choices=sorted(B_SETTINGS.keys()))
+    parser.add_argument('--c_mode', type=str, default='C1', choices=sorted(C_SETTINGS.keys()))
+    parser.add_argument('--d_mode', type=str, default='D3', choices=sorted(D_SETTINGS.keys()))
     return parser
 
 
@@ -101,6 +185,30 @@ def build_class_names(cfg):
     if len(class_names) == cfg['nclass']:
         return class_names[1:]
     return class_names[:cfg['nclass'] - 1]
+
+
+def get_ablation_setting(mode):
+    if mode not in ABLATION_SETTINGS:
+        raise ValueError(f'Unknown ablation mode: {mode}')
+    return dict(ABLATION_SETTINGS[mode])
+
+
+def get_b_setting(mode):
+    if mode not in B_SETTINGS:
+        raise ValueError(f'Unknown B setting: {mode}')
+    return dict(B_SETTINGS[mode])
+
+
+def get_c_setting(mode):
+    if mode not in C_SETTINGS:
+        raise ValueError(f'Unknown C setting: {mode}')
+    return dict(C_SETTINGS[mode])
+
+
+def get_d_setting(mode):
+    if mode not in D_SETTINGS:
+        raise ValueError(f'Unknown D setting: {mode}')
+    return dict(D_SETTINGS[mode])
 
 
 class FeatureExtractor(nn.Module):
@@ -671,9 +779,38 @@ def compute_unsupervised_loss(predict, target, logits, strong_threshold, ignore_
 def main(args, cfg, save_path, cp_path):
     logger = init_log('global', logging.INFO, os.path.join(save_path, args.exp))
     logger.propagate = 0
+    ablation = get_ablation_setting(args.ablation_mode)
+    b_setting = get_b_setting(args.b_mode)
+    c_setting = get_c_setting(args.c_mode)
+    d_setting = get_d_setting(args.d_mode)
+    sinkhorn_iters = d_setting['sinkhorn_iters']
     all_args = {**cfg, **vars(args)}
+    all_args['ablation_description'] = ablation['description']
+    all_args['b_description'] = b_setting['description']
+    all_args['c_description'] = c_setting['description']
+    all_args['d_description'] = d_setting['description']
+    all_args['effective_sinkhorn_iters'] = sinkhorn_iters
     logger.info('{}\n'.format(pprint.pformat(all_args)))
     writer = SummaryWriter(save_path)
+    logger.info(
+        'Ablation %s: unsup=%s, ot=%s, proto=%s, revisit=%s (%s)',
+        args.ablation_mode,
+        ablation['use_unsup'],
+        ablation['use_ot'],
+        ablation['use_proto'],
+        ablation['use_revisit'],
+        ablation['description'],
+    )
+    logger.info(
+        'Experiment B/C/D: %s (%s), %s (%s), %s (%s), sinkhorn_iters=%d',
+        args.b_mode,
+        b_setting['description'],
+        args.c_mode,
+        c_setting['description'],
+        args.d_mode,
+        d_setting['description'],
+        sinkhorn_iters,
+    )
 
     model = UNet(in_chns=1, class_num=cfg['nclass']).cuda()
     ema_model = deepcopy(model).cuda()
@@ -823,8 +960,8 @@ def main(args, cfg, save_path, cp_path):
         for i, (labeled_data, unlabeled_data) in enumerate(trainloader):
             current_epoch = epoch + float(i) / max(len(trainloader), 1)
             ssl_rampup = gaussian_rampup(current_epoch, args.rampup_epochs)
-            current_ot_weight = 0.0
-            current_reco_weight = args.reco_weight * ssl_rampup
+            current_ot_weight = args.ot_weight * ssl_rampup if (ablation['use_ot'] and b_setting['use_soft_targets']) else 0.0
+            current_reco_weight = args.reco_weight * ssl_rampup if ablation['use_proto'] else 0.0
 
             img_x, mask_x = labeled_data
             img_x = img_x.cuda(non_blocking=True)
@@ -837,35 +974,56 @@ def main(args, cfg, save_path, cp_path):
 
             with torch.no_grad():
                 pred_u_teacher_weak, u_feature_map_teacher_weak = forward_with_features(ema_model, img_w)
-                if not use_fixed_prior:
+                if ablation['use_unsup'] and b_setting['use_soft_targets'] and not use_fixed_prior:
                     update_running_prior(target_prior, mask_x, cfg['nclass'], args.prior_momentum)
 
                 weak_valid_u_mask = ignore_mask != 255
                 pseudo_prob_weak = torch.softmax(pred_u_teacher_weak, dim=1)
-                adaptive_relax = compute_adaptive_sinkhorn_relax(
-                    prob_map=pseudo_prob_weak.detach(),
-                    valid_mask=weak_valid_u_mask,
-                    base_relax=args.sinkhorn_relax,
-                    min_relax=args.sinkhorn_relax_min,
-                    fg_prob_threshold=args.sinkhorn_fg_prob_threshold,
-                )
-                aligned_prob_u_weak = sinkhorn_align_distribution(
-                    pseudo_prob_weak.detach(),
-                    weak_valid_u_mask,
-                    target_prior,
-                    eps=args.sinkhorn_eps,
-                    num_iters=args.sinkhorn_iters,
-                    relax=adaptive_relax,
-                )
-                aligned_conf_u_weak, aligned_label_u_weak = torch.max(aligned_prob_u_weak, dim=1)
-                train_u_aug_data, train_u_aug_label, train_u_aug_logits, train_u_aug_soft_label, train_u_aug_ignore_mask = generate_unsup_data_with_soft_targets(
-                    img_s,
-                    aligned_label_u_weak.clone(),
-                    aligned_conf_u_weak.clone(),
-                    aligned_prob_u_weak.clone(),
-                    ignore_mask.clone(),
-                    mode=args.apply_aug,
-                )
+                pseudo_conf_weak, pseudo_label_weak = torch.max(pseudo_prob_weak, dim=1)
+                adaptive_relax = 0.0
+                effective_relax = 0.0
+                aligned_prob_u_weak = None
+                aligned_conf_u_weak = None
+                aligned_label_u_weak = None
+                train_u_aug_soft_label = None
+
+                if ablation['use_unsup'] and b_setting['use_soft_targets']:
+                    if c_setting['use_adaptive_relax']:
+                        adaptive_relax = compute_adaptive_sinkhorn_relax(
+                            prob_map=pseudo_prob_weak.detach(),
+                            valid_mask=weak_valid_u_mask,
+                            base_relax=args.sinkhorn_relax,
+                            min_relax=args.sinkhorn_relax_min,
+                            fg_prob_threshold=args.sinkhorn_fg_prob_threshold,
+                        )
+                        effective_relax = adaptive_relax
+                    else:
+                        effective_relax = float(args.sinkhorn_relax)
+                    aligned_prob_u_weak = sinkhorn_align_distribution(
+                        pseudo_prob_weak.detach(),
+                        weak_valid_u_mask,
+                        target_prior,
+                        eps=args.sinkhorn_eps,
+                        num_iters=sinkhorn_iters,
+                        relax=effective_relax,
+                    )
+                    aligned_conf_u_weak, aligned_label_u_weak = torch.max(aligned_prob_u_weak, dim=1)
+                    train_u_aug_data, train_u_aug_label, train_u_aug_logits, train_u_aug_soft_label, train_u_aug_ignore_mask = generate_unsup_data_with_soft_targets(
+                        img_s,
+                        aligned_label_u_weak.clone(),
+                        aligned_conf_u_weak.clone(),
+                        aligned_prob_u_weak.clone(),
+                        ignore_mask.clone(),
+                        mode=args.apply_aug,
+                    )
+                else:
+                    train_u_aug_data, train_u_aug_label, train_u_aug_logits = generate_unsup_data(
+                        img_s,
+                        pseudo_label_weak.clone(),
+                        pseudo_conf_weak.clone(),
+                        mode=args.apply_aug,
+                    )
+                    train_u_aug_ignore_mask = ignore_mask.clone()
 
             pred_l, l_feature_map = forward_with_features(model, img_x)
             pred_u, u_feature_map = forward_with_features(model, train_u_aug_data)
@@ -887,75 +1045,101 @@ def main(args, cfg, save_path, cp_path):
             loss_dice = diceloss(pred_l, mask_x)
             supervised_loss = loss_ce + loss_dice
 
-            train_u_aug_soft_label = sharpen_probability_map(
-                train_u_aug_soft_label.detach(),
-                temperature=args.sharpen_temperature,
-            )
-            valid_u_mask = (
-                (train_u_aug_label >= 0)
-                & (train_u_aug_ignore_mask != 255)
-                & train_u_aug_logits.ge(args.strong_threshold)
-            )
-            unsup_loss = compute_distribution_alignment_loss(
-                pred_u,
-                train_u_aug_soft_label,
-                valid_u_mask,
-            )
+            if ablation['use_unsup'] and b_setting['use_soft_targets']:
+                train_u_aug_soft_label = sharpen_probability_map(
+                    train_u_aug_soft_label.detach(),
+                    temperature=args.sharpen_temperature,
+                )
+                valid_u_mask = (
+                    (train_u_aug_label >= 0)
+                    & (train_u_aug_ignore_mask != 255)
+                    & train_u_aug_logits.ge(args.strong_threshold)
+                )
+                unsup_loss = compute_distribution_alignment_loss(
+                    pred_u,
+                    train_u_aug_soft_label,
+                    valid_u_mask,
+                )
+            elif ablation['use_unsup']:
+                valid_u_mask = (train_u_aug_label >= 0) & (train_u_aug_ignore_mask != 255)
+                unsup_loss = compute_unsupervised_loss(
+                    pred_u,
+                    train_u_aug_label,
+                    train_u_aug_logits,
+                    args.strong_threshold,
+                    ignore_mask=train_u_aug_ignore_mask,
+                )
+            else:
+                valid_u_mask = torch.zeros_like(train_u_aug_label, dtype=torch.bool)
+                unsup_loss = pred_u.new_tensor(0.0)
 
             with torch.no_grad():
-                prototype_valid_u_weak = build_classwise_prototype_mask(
-                    aligned_conf_u_weak,
-                    aligned_label_u_weak,
-                    weak_valid_u_mask,
-                    relative_ratio=args.prototype_threshold,
-                    min_threshold=args.prototype_min_threshold,
-                )
-                prototype_valid_u = build_classwise_prototype_mask(
-                    train_u_aug_logits,
-                    train_u_aug_label,
-                    valid_u_mask,
-                    relative_ratio=args.prototype_threshold,
-                    min_threshold=args.prototype_min_threshold,
-                )
-                labeled_valid = torch.ones_like(mask_x, dtype=torch.bool)
-                update_ema_prototypes(
-                    class_prototypes,
-                    prototype_mask,
-                    torch.cat((rep_l_teacher, rep_u_teacher), dim=0).detach(),
-                    torch.cat((mask_x, aligned_label_u_weak), dim=0),
-                    torch.cat((labeled_valid, prototype_valid_u_weak), dim=0),
-                    args.prototype_momentum,
-                    num_prototypes_per_class=args.num_prototypes_per_class,
-                    assignment_temp=args.prototype_temperature,
-                )
+                if ablation['use_proto']:
+                    teacher_conf_for_proto = aligned_conf_u_weak if b_setting['use_soft_targets'] else pseudo_conf_weak
+                    teacher_label_for_proto = aligned_label_u_weak if b_setting['use_soft_targets'] else pseudo_label_weak
+                    prototype_valid_u_weak = build_classwise_prototype_mask(
+                        teacher_conf_for_proto,
+                        teacher_label_for_proto,
+                        weak_valid_u_mask,
+                        relative_ratio=args.prototype_threshold,
+                        min_threshold=args.prototype_min_threshold,
+                    )
+                    prototype_valid_u = build_classwise_prototype_mask(
+                        train_u_aug_logits,
+                        train_u_aug_label,
+                        valid_u_mask,
+                        relative_ratio=args.prototype_threshold,
+                        min_threshold=args.prototype_min_threshold,
+                    )
+                    labeled_valid = torch.ones_like(mask_x, dtype=torch.bool)
+                    update_ema_prototypes(
+                        class_prototypes,
+                        prototype_mask,
+                        torch.cat((rep_l_teacher, rep_u_teacher), dim=0).detach(),
+                        torch.cat((mask_x, teacher_label_for_proto), dim=0),
+                        torch.cat((labeled_valid, prototype_valid_u_weak), dim=0),
+                        args.prototype_momentum,
+                        num_prototypes_per_class=args.num_prototypes_per_class,
+                        assignment_temp=args.prototype_temperature,
+                    )
+                else:
+                    prototype_valid_u = torch.zeros_like(valid_u_mask, dtype=torch.bool)
 
             ot_loss = pred_u.new_tensor(0.0)
-            proto_loss = compute_prototype_contrastive_loss(
-                rep_l=rep_l,
-                mask_l=mask_x,
-                rep_u=rep_u,
-                pseudo_u=train_u_aug_label,
-                valid_u_mask=prototype_valid_u,
-                prototypes=class_prototypes.detach(),
-                prototype_mask=prototype_mask.detach(),
-                func=args.func,
-                num_queries=args.num_queries,
-                temp=args.prototype_temperature,
-            )
+            if ablation['use_proto']:
+                proto_loss = compute_prototype_contrastive_loss(
+                    rep_l=rep_l,
+                    mask_l=mask_x,
+                    rep_u=rep_u,
+                    pseudo_u=train_u_aug_label,
+                    valid_u_mask=prototype_valid_u,
+                    prototypes=class_prototypes.detach(),
+                    prototype_mask=prototype_mask.detach(),
+                    func=args.func,
+                    num_queries=args.num_queries,
+                    temp=args.prototype_temperature,
+                )
+            else:
+                proto_loss = pred_u.new_tensor(0.0)
 
-            loss_q, pooled_rep_u_teacher = get_revisiting_loss(random_pool, rep_u, rep_u_teacher, topk=args.topk)
+            if ablation['use_revisit']:
+                loss_q, pooled_rep_u_teacher = get_revisiting_loss(random_pool, rep_u, rep_u_teacher, topk=args.topk)
+            else:
+                loss_q = pred_u.new_tensor(0.0)
+                pooled_rep_u_teacher = None
 
             loss = (
                 supervised_loss
                 + args.unsup_weight * unsup_loss
                 + current_reco_weight * proto_loss
-                + args.revisit_weight * loss_q
+                + (args.revisit_weight * loss_q if ablation['use_revisit'] else 0.0)
             )
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            dequeue_and_enqueue(pooled_rep_u_teacher, random_pool, random_pool_ptr)
+            if ablation['use_revisit']:
+                dequeue_and_enqueue(pooled_rep_u_teacher, random_pool, random_pool_ptr)
 
             iter_num += 1
             update_ema_variables(model, ema_model, args.ema_decay, iter_num)
@@ -989,7 +1173,8 @@ def main(args, cfg, save_path, cp_path):
             writer.add_scalar('train/pseudo_conf_ratio', train_u_aug_logits.ge(args.strong_threshold).float().mean().item(), iters)
             writer.add_scalar('train/pseudo_conf_valid_ratio', valid_u_mask.float().mean().item(), iters)
             writer.add_scalar('train/prior_fg_ratio', target_prior[1:].sum().item(), iters)
-            writer.add_scalar('train/sinkhorn_relax', adaptive_relax, iters)
+            writer.add_scalar('train/sinkhorn_relax', effective_relax, iters)
+            writer.add_scalar('train/sinkhorn_iters', sinkhorn_iters, iters)
 
             if i % log_interval == 0:
                 logger.info(
@@ -1113,7 +1298,10 @@ if __name__ == '__main__':
 
     cp_path = os.path.join(
         args.checkpoint_path,
-        'OT_ARCO/Ep{}bs{}_{}_seed{}_label{}/{}'.format(
+        'AHE/{}/{}/{}/Ep{}bs{}_{}_seed{}_label{}/{}'.format(
+            args.ablation_mode,
+            args.b_mode,
+            f'{args.c_mode}_{args.d_mode}',
             cfg['epochs'],
             cfg['batch_size'],
             cfg['dataset'],
