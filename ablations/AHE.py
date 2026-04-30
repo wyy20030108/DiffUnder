@@ -1331,3 +1331,11 @@ if __name__ == '__main__':
             print(f'Warning: {item} not found.')
 
     main(args, cfg, save_path, cp_path)
+
+"""
+A0 B1__C1_D3 Dice: 0.8673, Jaccard: 0.7711, HD95: 7.6153, ASD: 2.2731
+A1 B1__C1_D3 Dice: 0.8951, Jaccard: 0.8139, HD95: 1.5434, ASD: 0.5543
+A2 B1__C1_D3 Dice: 0.8979, Jaccard: 0.8186, HD95: 1.7749, ASD: 0.5426
+A3 B1__C1_D3 Dice: 0.8974, Jaccard: 0.8172, HD95: 2.0690, ASD: 0.6770
+A4 B1__C1_D3 Dice: 0.8941, Jaccard: 0.8119, HD95: 2.3088, ASD: 0.7434
+"""

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-DATASET="20acdc"
+DATASET="5acdc"
 SEED=2026
 EXP_PREFIX="AHE-ablation"
 
