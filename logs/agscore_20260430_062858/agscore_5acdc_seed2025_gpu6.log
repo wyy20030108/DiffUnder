@@ -1,0 +1,61 @@
+[2026-04-30 06:28:58] START gpu=6 seed=2025 label=5acdc
+[2026-04-30 06:29:08,723][    INFO] {'agscore_gmm_grid_size': 512,
+ 'agscore_reduced_size': 64,
+ 'agscore_subsample_size': 8192,
+ 'backbone': 'resnet34',
+ 'base_dir': '/data/lhy_data/ACDC',
+ 'baseline': 'unet',
+ 'batch_size': 8,
+ 'checkpoint_path': '/data/lhy_data/checkpoints_wyy',
+ 'conf_thresh': 0.95,
+ 'config': 'configs/ACDC/5acdc.yaml',
+ 'consistency': 1,
+ 'crop_size': [256, 256],
+ 'dataset': '5acdc',
+ 'deterministic': False,
+ 'device': 'cuda:6',
+ 'epochs': 200,
+ 'exp': 'AgScore_5acdc_seed2025',
+ 'labelnum': 3,
+ 'lock_backbone': False,
+ 'lr': 0.01,
+ 'model': 'unet_2d',
+ 'nclass': 4,
+ 'normal': None,
+ 'num': 67,
+ 'num_workers': 2,
+ 'optimizer': {'kwargs': {'lr': 0.01, 'momentum': 0.9, 'weight_decay': 0.0001},
+               'name': 'SGD'},
+ 'seed': 2025,
+ 'unsup_loss_weight': 0.1,
+ 'val_num_workers': 1,
+ 'val_patch_size': [256, 256]}
+
+[2026-04-30 06:29:09,102][    INFO] use 1 gpus!
+[2026-04-30 06:29:09,102][    INFO] Total params: 1.851M
+[2026-04-30 06:29:09,140][    INFO] ===> Epoch: 0/200, seed2025, seed:2025, labelnum: 3, Previous best mdice model: 0.0000 @epoch: 0, ema: 0.0000 @epoch_ema: 0
+5acdc
+Warning: comparison not found.
+train_u data number is: 1260
+train_l data number is: 52
+val data number is: 210
+Total iters: 31400
+[2026-04-30 06:29:13,100][    INFO] Iters: 1/31400, LR: 0.0100000, Total loss: 1.390, loss_l: 1.390, loss_dice: 0.967, loss_ce: 1.813, loss_u: 0.000, mask ratio: 0.0000
+[2026-04-30 06:30:08,591][    INFO] Iters: 34/31400, LR: 0.0099905, Total loss: 0.515, loss_l: 0.427, loss_dice: 0.753, loss_ce: 0.101, loss_u: 0.016, mask ratio: 0.7801
+[2026-04-30 06:31:07,858][    INFO] Iters: 67/31400, LR: 0.0099811, Total loss: 0.467, loss_l: 0.365, loss_dice: 0.630, loss_ce: 0.099, loss_u: 0.002, mask ratio: 0.4618
+[2026-04-30 06:32:18,947][    INFO] Iters: 100/31400, LR: 0.0099716, Total loss: 0.435, loss_l: 0.397, loss_dice: 0.704, loss_ce: 0.090, loss_u: 0.010, mask ratio: 0.8412
+[2026-04-30 06:33:28,626][    INFO] Iters: 133/31400, LR: 0.0099622, Total loss: 0.410, loss_l: 0.327, loss_dice: 0.583, loss_ce: 0.071, loss_u: 0.012, mask ratio: 0.8361
+[2026-04-30 06:34:18,450][    INFO] ===> Epoch: 1/200, seed2025, seed:2025, labelnum: 3, Previous best mdice model: 0.0000 @epoch: 0, ema: 0.0000 @epoch_ema: 0
+[2026-04-30 06:34:20,721][    INFO] Iters: 158/31400, LR: 0.0099550, Total loss: 0.321, loss_l: 0.320, loss_dice: 0.583, loss_ce: 0.058, loss_u: 0.012, mask ratio: 0.8278
+[2026-04-30 06:35:38,332][    INFO] Iters: 191/31400, LR: 0.0099455, Total loss: 0.311, loss_l: 0.287, loss_dice: 0.522, loss_ce: 0.052, loss_u: 0.010, mask ratio: 0.6983
+[2026-04-30 06:36:59,571][    INFO] Iters: 224/31400, LR: 0.0099361, Total loss: 0.292, loss_l: 0.245, loss_dice: 0.433, loss_ce: 0.057, loss_u: 0.001, mask ratio: 0.6120
+[2026-04-30 06:38:20,763][    INFO] Iters: 257/31400, LR: 0.0099266, Total loss: 0.276, loss_l: 0.234, loss_dice: 0.435, loss_ce: 0.033, loss_u: 0.000, mask ratio: 0.5519
+[2026-04-30 06:39:42,271][    INFO] Iters: 290/31400, LR: 0.0099171, Total loss: 0.259, loss_l: 0.187, loss_dice: 0.328, loss_ce: 0.046, loss_u: 0.003, mask ratio: 0.5771
+[2026-04-30 06:40:27,707][    INFO] ===> Epoch: 2/200, seed2025, seed:2025, labelnum: 3, Previous best mdice model: 0.0000 @epoch: 0, ema: 0.0000 @epoch_ema: 0
+[2026-04-30 06:40:30,393][    INFO] Iters: 315/31400, LR: 0.0099100, Total loss: 0.164, loss_l: 0.163, loss_dice: 0.280, loss_ce: 0.046, loss_u: 0.003, mask ratio: 0.5794
+[2026-04-30 06:41:40,615][    INFO] Iters: 348/31400, LR: 0.0099005, Total loss: 0.137, loss_l: 0.127, loss_dice: 0.210, loss_ce: 0.044, loss_u: 0.000, mask ratio: 0.5712
+[2026-04-30 06:42:43,112][    INFO] Iters: 381/31400, LR: 0.0098910, Total loss: 0.146, loss_l: 0.216, loss_dice: 0.378, loss_ce: 0.055, loss_u: 0.009, mask ratio: 0.6781
+[2026-04-30 06:43:45,554][    INFO] Iters: 414/31400, LR: 0.0098815, Total loss: 0.150, loss_l: 0.223, loss_dice: 0.394, loss_ce: 0.052, loss_u: 0.013, mask ratio: 0.7540
+[2026-04-30 06:44:47,894][    INFO] Iters: 447/31400, LR: 0.0098721, Total loss: 0.147, loss_l: 0.129, loss_dice: 0.228, loss_ce: 0.031, loss_u: 0.012, mask ratio: 0.7625
+[2026-04-30 06:45:38,223][    INFO] ===> Epoch: 3/200, seed2025, seed:2025, labelnum: 3, Previous best mdice model: 0.0000 @epoch: 0, ema: 0.0000 @epoch_ema: 0
+[2026-04-30 06:45:40,633][    INFO] Iters: 472/31400, LR: 0.0098649, Total loss: 0.123, loss_l: 0.123, loss_dice: 0.203, loss_ce: 0.044, loss_u: 0.001, mask ratio: 0.6338

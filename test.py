@@ -35,11 +35,13 @@ def get_parser():
     parser.add_argument('--dataset', type=str, default='ACDC')
     parser.add_argument('--base_dir', type=str, default='/data/lhy_data/ACDC')
     parser.add_argument('--labelnum', type=int, default=14)
-    parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--device', type=str, default='cuda:3')
     parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--split', type=str, default='test', choices=['test'])
     parser.add_argument('--save_model_path', type=str, required=True)
-    parser.add_argument('--use_ema', action='store_true', default=True)
+    parser.add_argument('--model_role', type=str, default=None, choices=['student', 'teacher'])
+    parser.add_argument('--use_ema', dest='use_ema', action='store_true', default=None)
+    parser.add_argument('--no_use_ema', dest='use_ema', action='store_false')
     parser.add_argument('--nclass', type=int, default=4)
     parser.add_argument('--readme_path', type=str, default=os.path.join(project_root, 'readme.md'))
     parser.add_argument('--readme_method', type=str, default='Ours')
@@ -299,6 +301,17 @@ def sanitize_state_dict(state_dict):
     return sanitized
 
 
+def resolve_inference_role(args):
+    if args.model_role is not None:
+        args.use_ema = args.model_role == 'teacher'
+    elif args.use_ema is None:
+        args.use_ema = True
+        args.model_role = 'teacher'
+    else:
+        args.model_role = 'teacher' if args.use_ema else 'student'
+    return args.model_role
+
+
 def load_model(args, cfg):
     model = UNet(in_chns=1, class_num=cfg['nclass']).cuda()
     checkpoint = torch.load(args.save_model_path, map_location='cpu', weights_only=False)
@@ -422,8 +435,10 @@ if __name__ == '__main__':
     parser = get_parser()
     args = parser.parse_args()
     ckpt_metadata = apply_checkpoint_metadata(args)
+    resolved_role = resolve_inference_role(args)
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device.split(':')[-1]
+    print(f'Inference role: {resolved_role} (use_ema={args.use_ema})')
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)

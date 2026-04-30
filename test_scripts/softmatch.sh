@@ -11,10 +11,33 @@ BASE_DIR="${BASE_DIR:-/data/lhy_data/ACDC}"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/data/lhy_data/checkpoints_wyy}"
 METHOD_DIR="${METHOD_DIR:-$CHECKPOINT_ROOT/$METHOD_NAME}"
 
-GPU_IDS_STR="${GPU_IDS:-0}"
+usage() {
+    cat <<'EOF'
+Usage:
+  bash test_scripts/softmatch.sh <gpu_ids>
+  GPU_IDS="<gpu_ids>" bash test_scripts/softmatch.sh
+
+Examples:
+  bash test_scripts/softmatch.sh 0
+  bash test_scripts/softmatch.sh 0,1
+  GPU_IDS="2" bash test_scripts/softmatch.sh
+EOF
+}
+
+if [[ $# -ge 1 ]]; then
+    GPU_IDS_STR="$1"
+elif [[ -n "${GPU_IDS:-}" ]]; then
+    GPU_IDS_STR="$GPU_IDS"
+else
+    echo "You must specify GPU id(s)."
+    usage
+    exit 1
+fi
+
 IFS=', ' read -r -a GPU_ID_LIST <<< "$GPU_IDS_STR"
 if [[ "${#GPU_ID_LIST[@]}" -eq 0 ]]; then
-    echo "No GPU ids provided. Set GPU_IDS, for example: GPU_IDS=\"0\" or GPU_IDS=\"0,1\"."
+    echo "Invalid GPU id(s): $GPU_IDS_STR"
+    usage
     exit 1
 fi
 
@@ -22,6 +45,16 @@ README_METHOD_VALUE="${README_METHOD:-$METHOD_NAME}"
 SKIP_README_UPDATE="${SKIP_README_UPDATE:-1}"
 README_PATH_VALUE="${README_PATH:-$ROOT_DIR/readme.md}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/test_logs/${METHOD_NAME,,}}"
+
+cleanup() {
+    local exit_code=$?
+    trap - INT TERM EXIT
+    jobs -pr | xargs -r kill 2>/dev/null || true
+    wait || true
+    exit "$exit_code"
+}
+
+trap cleanup INT TERM EXIT
 
 mkdir -p "$LOG_DIR"
 cd "$ROOT_DIR"
@@ -128,7 +161,7 @@ run_inference() {
     local exp_name
     local setting_name
     local log_file
-    local use_ema_flag="False"
+    local -a cmd
 
     exp_dir="$(basename "$(dirname "$(dirname "$ckpt_path")")")"
     setting_dir="$(basename "$(dirname "$ckpt_path")")"
@@ -136,59 +169,22 @@ run_inference() {
     setting_name="$(trim "$setting_dir")"
     log_file="$LOG_DIR/${exp_name}__${setting_name}__${best_role}.log"
 
-    if [[ "$best_role" == "teacher" ]]; then
-        use_ema_flag="True"
+    cmd=(
+        "$PYTHON_BIN" "$TEST_PY"
+        --dataset "$DATASET"
+        --base_dir "$BASE_DIR"
+        --device "$gpu_id"
+        --save_model_path "$ckpt_path"
+        --model_role "$best_role"
+        --readme_method "$README_METHOD_VALUE"
+        --readme_path "$README_PATH_VALUE"
+    )
+    if [[ "$SKIP_README_UPDATE" == "1" ]]; then
+        cmd+=(--skip_readme_update)
     fi
 
     echo "[$(date '+%F %T')] START gpu=${gpu_id} role=${best_role} score=${best_score} ckpt=${ckpt_path}"
-    CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON_BIN" - "$TEST_PY" "$BASE_DIR" "$ckpt_path" "$README_METHOD_VALUE" "$README_PATH_VALUE" "$use_ema_flag" "$SKIP_README_UPDATE" >"$log_file" 2>&1 <<'PY'
-import importlib.util
-import os
-import sys
-
-test_py, base_dir, save_model_path, readme_method, readme_path, use_ema_text, skip_readme_text = sys.argv[1:]
-use_ema = use_ema_text == 'True'
-skip_readme_update = skip_readme_text == '1'
-
-spec = importlib.util.spec_from_file_location('diffunder_test_module', test_py)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
-args = module.get_parser().parse_args([
-    '--dataset', 'ACDC',
-    '--base_dir', base_dir,
-    '--device', 'cuda:0',
-    '--save_model_path', save_model_path,
-    '--readme_method', readme_method,
-    '--readme_path', readme_path,
-] + (['--skip_readme_update'] if skip_readme_update else []))
-
-module.apply_checkpoint_metadata(args)
-args.use_ema = use_ema
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-module.torch.manual_seed(args.seed)
-module.torch.cuda.manual_seed(args.seed)
-module.torch.cuda.manual_seed_all(args.seed)
-module.np.random.seed(args.seed)
-
-cfg = module.build_fixed_cfg(args)
-avg_metrics, mean_metrics = module.test_acdc(args, cfg)
-
-if not args.skip_readme_update:
-    resolved_method = module.infer_readme_method(args.save_model_path, args.readme_method)
-    metadata = module.parse_checkpoint_metadata(args.save_model_path)
-    module.update_readme_results(
-        readme_path=args.readme_path,
-        dataset=metadata['dataset'] or args.dataset,
-        seed=metadata['seed'] or args.seed,
-        labelnum=metadata['labelnum'] or args.labelnum,
-        method_name=resolved_method,
-        avg_metrics=avg_metrics,
-        mean_metrics=mean_metrics,
-    )
-    print(f'Updated {args.readme_path} -> {resolved_method}')
-PY
+    "${cmd[@]}" 2>&1 | tee "$log_file"
     echo "[$(date '+%F %T')] DONE  gpu=${gpu_id} role=${best_role} score=${best_score} log=${log_file}"
 }
 
