@@ -124,7 +124,7 @@ def infer_readme_method(save_model_path, fallback='Ours'):
         for method_name in README_METHODS:
             if normalize_method_name(method_name) in normalized_part:
                 return method_name
-    return 'Ours'
+    return fallback or 'Ours'
 
 
 def parse_checkpoint_metadata(save_model_path):
@@ -269,7 +269,7 @@ def resolve_state_dict(checkpoint, use_ema=False):
     if not isinstance(checkpoint, dict):
         return checkpoint
     if use_ema:
-        preferred_keys = ['model_ema', 'ema', 'teacher', 'model2', 'model', 'state_dict', 'student', 'net', 'teacher_model']
+        preferred_keys = ['ema_model', 'model_ema', 'ema', 'teacher', 'model2', 'model', 'state_dict', 'student', 'net', 'teacher_model']
     else:
         preferred_keys = ['model', 'model1', 'state_dict', 'student', 'net', 'model_ema', 'ema', 'teacher', 'model2', 'student_model']
     for key in preferred_keys:

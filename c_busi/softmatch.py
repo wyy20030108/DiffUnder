@@ -29,17 +29,10 @@ from utils.util import count_params, init_log, AverageMeter, DiceLoss
 from utils.val import eval_2d
 
 
-DEFAULT_BUSI_CFG = {
+SCRIPT_DEFAULT_CFG = {
     'dataset': 'BUSI',
-    'base_dir': '/data/lhy_data/BUSI',
-    'labelnum': 100,
     'label_help': 'number of labeled BUSI images',
-    'num': None,
-    'nclass': 2,
-    'lr': 0.001,
-    'epochs': 200,
     'batch_size': 8,
-    'crop_size': 256,
     'conf_thresh': 0.95,
 }
 
@@ -161,15 +154,15 @@ def get_default_args(cli_dataset):
         defaults = dict(DATASET_CONFIGS[cli_dataset])
         defaults.setdefault('dataset', cli_dataset)
         return defaults
-    return dict(DEFAULT_BUSI_CFG)
+    return {}
 
 
 def get_parser(defaults):
     parser = argparse.ArgumentParser(description=defaults.get('dataset', 'BUSI'))
-    parser.add_argument('--dataset', type=str, default=defaults.get('dataset', 'BUSI'))
-    parser.add_argument('--base_dir', type=str, default=defaults.get('base_dir', DEFAULT_BUSI_CFG['base_dir']))
-    parser.add_argument('--labelnum', type=int, default=defaults.get('labelnum', DEFAULT_BUSI_CFG['labelnum']), help=defaults.get('label_help', DEFAULT_BUSI_CFG['label_help']))
-    parser.add_argument('--num', default=defaults.get('num', DEFAULT_BUSI_CFG['num']), type=int, help='unlabeled data number')
+    parser.add_argument('--dataset', type=str, default=None)
+    parser.add_argument('--base_dir', type=str, default=None)
+    parser.add_argument('--labelnum', type=int, default=None, help=defaults.get('label_help', SCRIPT_DEFAULT_CFG['label_help']))
+    parser.add_argument('--num', default=None, type=int, help='unlabeled data number')
     parser.add_argument('--config', type=str, default=defaults.get('config'))
     parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--device', type=str, default='cuda:0')
@@ -190,13 +183,23 @@ def get_parser(defaults):
 
 
 def load_cfg(args, defaults):
-    cfg = dict(DEFAULT_BUSI_CFG)
+    cfg = dict(SCRIPT_DEFAULT_CFG)
     cfg.update(defaults)
     if args.config is not None:
         with open(args.config, 'r') as f:
             cfg.update(yaml.load(f, Loader=yaml.Loader))
-    cfg['dataset'] = args.dataset
+    for key in ('dataset', 'base_dir', 'labelnum', 'num'):
+        value = getattr(args, key)
+        if value is not None:
+            cfg[key] = value
+    cfg.setdefault('dataset', 'BUSI')
     return cfg
+
+
+def sync_args_from_cfg(args, cfg):
+    for key in ('dataset', 'base_dir', 'labelnum', 'num', 'crop_size'):
+        setattr(args, key, cfg.get(key))
+    return args
 
 
 def build_class_names(cfg):
@@ -458,6 +461,7 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(seed)
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device.split(':')[-1]
     cfg = load_cfg(args, defaults)
+    args = sync_args_from_cfg(args, cfg)
 
     cp_path = os.path.join(
         args.checkpoint_path,

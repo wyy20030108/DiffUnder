@@ -10,6 +10,7 @@ import logging
 import math
 import pprint
 import random
+import re
 import shutil
 import sys
 import time
@@ -114,6 +115,13 @@ def get_parser(defaults):
     parser.add_argument('--num_prototypes_per_class', type=int, default=4)
     parser.add_argument('--rampup_epochs', type=float, default=40.0)
     parser.add_argument('--sharpen_temperature', type=float, default=0.5)
+    parser.add_argument('--auto_test_after_train', type=str2bool, default=True)
+    parser.add_argument('--auto_test_split', type=str, default='test', choices=['test', 'val', 'val_test'])
+    parser.add_argument('--auto_test_save_pred_root', type=str, default=None)
+    parser.add_argument('--auto_update_readme', type=str2bool, default=True)
+    parser.add_argument('--readme_path', type=str, default=os.path.join(project_root, 'readme.md'))
+    parser.add_argument('--readme_method', type=str, default=None)
+    parser.add_argument('--strict_eval_masks', type=str2bool, default=False)
     return parser
 
 
@@ -125,6 +133,127 @@ def load_cfg(args, defaults):
             cfg.update(yaml.load(f, Loader=yaml.Loader))
     cfg['dataset'] = args.dataset
     return cfg
+
+
+def infer_method_name_from_cp_path(cp_path, checkpoint_root, dataset, fallback='Ours'):
+    try:
+        relative_cp_path = os.path.relpath(cp_path, checkpoint_root)
+        method_segment = relative_cp_path.split(os.sep)[0]
+    except ValueError:
+        method_segment = os.path.basename(os.path.dirname(cp_path))
+
+    method_name = (method_segment or '').strip()
+    dataset_tokens = {str(dataset), str(dataset).upper(), str(dataset).lower()}
+    for token in sorted(dataset_tokens, key=len, reverse=True):
+        suffix = f'_{token}'
+        if method_name.endswith(suffix):
+            method_name = method_name[:-len(suffix)]
+            break
+    method_name = method_name.strip('_- ')
+    return method_name or fallback
+
+
+def parse_scored_checkpoint_name(file_name):
+    match = re.fullmatch(r'ep(?P<epoch>\d+)_m(?P<model>\d+(?:\.\d+)?)_ema(?P<ema>\d+(?:\.\d+)?)\.pth', file_name)
+    if match is None:
+        return None
+    return {
+        'epoch': int(match.group('epoch')),
+        'model_score': float(match.group('model')),
+        'ema_score': float(match.group('ema')),
+    }
+
+
+def select_best_inference_checkpoint(cp_path, prefer_ema=False):
+    stable_name = 'best_ema.pth' if prefer_ema else 'best_model.pth'
+    stable_path = os.path.join(cp_path, stable_name)
+    if os.path.exists(stable_path):
+        return stable_path, prefer_ema, stable_name
+
+    scored_candidates = []
+    for file_name in os.listdir(cp_path):
+        parsed = parse_scored_checkpoint_name(file_name)
+        if parsed is None:
+            continue
+        parsed['path'] = os.path.join(cp_path, file_name)
+        scored_candidates.append(parsed)
+
+    if scored_candidates:
+        score_key = 'ema_score' if prefer_ema else 'model_score'
+        best_candidate = max(scored_candidates, key=lambda item: (item[score_key], item['epoch']))
+        return best_candidate['path'], prefer_ema, 'scored_history'
+
+    latest_ckpt_path = os.path.join(cp_path, 'latest.pth')
+    if os.path.exists(latest_ckpt_path):
+        return latest_ckpt_path, False, 'latest'
+    raise FileNotFoundError(f'Cannot find any checkpoint under {cp_path}')
+
+
+def run_post_training_busi_inference(args, cfg, cp_path, logger, best_model_score, best_ema_score):
+    from test_busi import build_fixed_cfg as build_eval_cfg
+    from test_busi import test_busi as run_test_busi
+    from test_busi import update_readme_results
+
+    prefer_ema = best_ema_score >= best_model_score
+    best_ckpt_path, use_ema, checkpoint_source = select_best_inference_checkpoint(cp_path, prefer_ema=prefer_ema)
+    method_name = args.readme_method or infer_method_name_from_cp_path(
+        cp_path=cp_path,
+        checkpoint_root=args.checkpoint_path,
+        dataset=cfg['dataset'],
+        fallback='Ours',
+    )
+    save_pred_root = args.auto_test_save_pred_root or os.path.join(cp_path, 'auto_test')
+
+    eval_args = argparse.Namespace(
+        dataset=cfg['dataset'],
+        base_dir=args.base_dir,
+        labelnum=args.labelnum,
+        num=args.num,
+        device=args.device,
+        seed=args.seed,
+        split=args.auto_test_split,
+        save_model_path=best_ckpt_path,
+        use_ema=use_ema,
+        nclass=cfg['nclass'],
+        crop_size=cfg['crop_size'],
+        strict_eval_masks=args.strict_eval_masks,
+        save_pred_root=save_pred_root,
+        readme_path=args.readme_path,
+        readme_method=method_name,
+        skip_readme_update=True,
+    )
+    eval_cfg = build_eval_cfg(eval_args)
+
+    logger.info(
+        'Auto inference checkpoint: %s, use_ema=%s, source=%s, best_model=%.4f, best_ema=%.4f, method=%s',
+        best_ckpt_path,
+        use_ema,
+        checkpoint_source,
+        best_model_score,
+        best_ema_score,
+        method_name,
+    )
+    avg_metrics, mean_metrics = run_test_busi(eval_args, eval_cfg)
+
+    if args.auto_update_readme:
+        update_readme_results(
+            readme_path=args.readme_path,
+            dataset=cfg['dataset'],
+            seed=args.seed,
+            labelnum=args.labelnum,
+            method_name=method_name,
+            avg_metrics=avg_metrics,
+            mean_metrics=mean_metrics,
+        )
+        logger.info('Updated README %s -> %s', args.readme_path, method_name)
+
+    return {
+        'checkpoint_path': best_ckpt_path,
+        'use_ema': use_ema,
+        'method_name': method_name,
+        'avg_metrics': avg_metrics,
+        'mean_metrics': mean_metrics,
+    }
 
 
 def build_class_names(cfg):
@@ -790,6 +919,8 @@ def main(args, cfg, save_path, cp_path):
     iter_num = 0
 
     latest_ckpt_path = os.path.join(cp_path, 'latest.pth')
+    best_model_ckpt_path = os.path.join(cp_path, 'best_model.pth')
+    best_ema_ckpt_path = os.path.join(cp_path, 'best_ema.pth')
     if os.path.exists(latest_ckpt_path):
         checkpoint = torch.load(latest_ckpt_path, weights_only=False)
         model.load_state_dict(checkpoint['model'])
@@ -844,6 +975,8 @@ def main(args, cfg, save_path, cp_path):
         proto_meter = AverageMeter()
         revisit_meter = AverageMeter()
         is_best = False
+        model_improved = False
+        ema_improved = False
         mDice = torch.tensor(pre_best_dice)
         mDice_ema = torch.tensor(pre_best_dice_ema)
 
@@ -1060,7 +1193,9 @@ def main(args, cfg, save_path, cp_path):
             writer.add_scalar('eval/mDice_model', mDice.item(), epoch)
             writer.add_scalar('eval/mDice_ema', mDice_ema.item(), epoch)
 
-            is_best = (mDice.item() >= pre_best_dice) or (mDice_ema.item() >= pre_best_dice_ema)
+            model_improved = mDice.item() >= pre_best_dice
+            ema_improved = mDice_ema.item() >= pre_best_dice_ema
+            is_best = model_improved or ema_improved
             pre_best_dice = max(mDice.item(), pre_best_dice)
             pre_best_dice_ema = max(mDice_ema.item(), pre_best_dice_ema)
             if mDice.item() == pre_best_dice:
@@ -1105,13 +1240,26 @@ def main(args, cfg, save_path, cp_path):
                 )
             )
             torch.save(model_ckpt, os.path.join(cp_path, f'ep{epoch}_m{mDice.item():.3f}_ema{mDice_ema.item():.3f}.pth'))
+        if model_improved:
+            torch.save(model_ckpt, best_model_ckpt_path)
+        if ema_improved:
+            torch.save(model_ckpt, best_ema_ckpt_path)
 
-        if epoch >= cfg['epochs'] - 1:
-            end_time = time.time()
-            logger.info('Training time: %.2fs', end_time - start_time)
-            gc.collect()
-            torch.cuda.empty_cache()
-            writer.close()
+    end_time = time.time()
+    logger.info('Training time: %.2fs', end_time - start_time)
+    writer.close()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    if args.auto_test_after_train:
+        run_post_training_busi_inference(
+            args=args,
+            cfg=cfg,
+            cp_path=cp_path,
+            logger=logger,
+            best_model_score=pre_best_dice,
+            best_ema_score=pre_best_dice_ema,
+        )
 
 
 if __name__ == '__main__':

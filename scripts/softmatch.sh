@@ -2,13 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="${DATA_DIR:-/data/lhy_data/checkpoints_wyy/SoftMatch}"
 cd "$ROOT_DIR"
 
-GPU_IDS=(4 7)
+GPU_IDS=(5 6)
 SEEDS=(2025 2026 2027)
 DATASETS=(20acdc 10acdc 5acdc)
 EXP_PREFIX="${EXP_PREFIX:-SoftMatch}"
-LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs/softmatch}"
+LOG_DIR="${LOG_DIR:-$DATA_DIR/logs/softmatch}"
 
 mkdir -p "$LOG_DIR"
 
@@ -25,7 +26,7 @@ run_job() {
         --seed "$seed" \
         --exp "$exp_name" \
         --device "cuda:$gpu_id" \
-        >"$log_file" 2>&1
+    2>&1 | tee "$log_file"
     echo "[$(date '+%F %T')] DONE  gpu=${gpu_id} dataset=${dataset} seed=${seed}"
 }
 
