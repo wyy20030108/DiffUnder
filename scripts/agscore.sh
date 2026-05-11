@@ -8,8 +8,8 @@ set -o pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
-SEEDS=(2025)
-LABELS=(5acdc 10acdc)
+SEEDS=(2027)
+LABELS=(10acdc)
 
 # 默认使用 6 和 7 号卡（如果不传参数的话）
 DEFAULT_GPUS=(6 7)
