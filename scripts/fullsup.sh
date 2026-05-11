@@ -2,7 +2,7 @@
 GPUID=1
 
 CUDA_VISIBLE_DEVICES=$GPUID python comparsion/fullsup.py \
- --cli_dataset "10acdc" \
- --seed 2025 \
- --exp "Fully Supervised" \
+ --cli_dataset "20acdc" \
+ --seed 2027 \
+ --exp "FullySupervised" \
  --device "cuda:$GPUID"

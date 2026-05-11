@@ -29,7 +29,7 @@ BUSI_RATIO_MAP = {
 README_METHODS = ['FullSup', 'DHC', 'CPS', 'UniMatch', 'FixMatch', 'SoftMatch', 'RankMatch', 'AgScore', 'CGS', 'ABD', 'ARCO', 'Ours']
 
 
-# python test.py --device 1 --save_model_path /data/lhy_data/checkpoints_wyy/ARCO/Ep200bs8_ACDC_seed2026_label3/ARCO/ep194_m0.601_ema0.604.pth
+# python test.py --device 6 --save_model_path /data/lhy_data/checkpoints_wyy/AgScore/Ep200bs8_ACDC_seed2026_label7/thresh0.95_AgScore_10acdc_seed2026/ep190_m0.636_ema0.627.pth
 def get_parser():
     parser = argparse.ArgumentParser(description='2D test script')
     parser.add_argument('--dataset', type=str, default='ACDC')

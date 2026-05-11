@@ -1,31 +1,33 @@
 Inference role: student (use_ema=False)
 test data number is: 380
-  0%|                                                                        | 0/20 [00:00<?, ?it/s]  5%|███▏                                                            | 1/20 [00:05<01:42,  5.38s/it] 10%|██████▍                                                         | 2/20 [00:07<01:01,  3.41s/it] 15%|█████████▌                                                      | 3/20 [00:10<00:54,  3.21s/it] 20%|████████████▊                                                   | 4/20 [00:11<00:40,  2.53s/it] 25%|████████████████                                                | 5/20 [00:14<00:39,  2.66s/it] 30%|███████████████████▏                                            | 6/20 [00:15<00:27,  1.95s/it] 35%|██████████████████████▍                                         | 7/20 [00:18<00:29,  2.28s/it] 40%|█████████████████████████▌                                      | 8/20 [00:19<00:25,  2.08s/it] 45%|████████████████████████████▊                                   | 9/20 [00:21<00:21,  1.98s/it] 50%|███████████████████████████████▌                               | 10/20 [00:22<00:17,  1.73s/it] 55%|██████████████████████████████████▋                            | 11/20 [00:26<00:21,  2.34s/it] 60%|█████████████████████████████████████▊                         | 12/20 [00:31<00:25,  3.15s/it] 65%|████████████████████████████████████████▉                      | 13/20 [00:33<00:19,  2.72s/it] 70%|████████████████████████████████████████████                   | 14/20 [00:34<00:12,  2.14s/it] 75%|███████████████████████████████████████████████▎               | 15/20 [00:35<00:08,  1.80s/it] 80%|██████████████████████████████████████████████████▍            | 16/20 [00:35<00:05,  1.41s/it] 85%|█████████████████████████████████████████████████████▌         | 17/20 [00:36<00:03,  1.29s/it] 90%|████████████████████████████████████████████████████████▋      | 18/20 [00:37<00:02,  1.05s/it] 95%|███████████████████████████████████████████████████████████▊   | 19/20 [00:38<00:01,  1.14s/it]100%|███████████████████████████████████████████████████████████████| 20/20 [00:39<00:00,  1.01s/it]100%|███████████████████████████████████████████████████████████████| 20/20 [00:39<00:00,  1.96s/it]
-patient001: RV: Dice 0.3261, Jc 0.1948, HD95 94.3925, ASD 38.7142, Myo: Dice 0.7042, Jc 0.5435, HD95 7.6092, ASD 3.5238, LV: Dice 0.9357, Jc 0.8792, HD95 1.4142, ASD 0.4898
-patient007: RV: Dice 0.1878, Jc 0.1037, HD95 95.9010, ASD 54.4543, Myo: Dice 0.3660, Jc 0.2240, HD95 69.0471, ASD 28.2865, LV: Dice 0.9208, Jc 0.8531, HD95 12.6806, ASD 2.6247
-patient008: RV: Dice 0.1523, Jc 0.0825, HD95 95.0684, ASD 54.2323, Myo: Dice 0.3771, Jc 0.2323, HD95 67.2978, ASD 19.3384, LV: Dice 0.9368, Jc 0.8811, HD95 2.0000, ASD 2.5172
-patient011: RV: Dice 0.6212, Jc 0.4505, HD95 100.3255, ASD 13.2642, Myo: Dice 0.7114, Jc 0.5521, HD95 5.0000, ASD 7.0931, LV: Dice 0.9619, Jc 0.9266, HD95 1.0000, ASD 0.2393
-patient013: RV: Dice 0.5903, Jc 0.4188, HD95 89.7541, ASD 25.6809, Myo: Dice 0.7874, Jc 0.6493, HD95 2.8284, ASD 0.8360, LV: Dice 0.9592, Jc 0.9216, HD95 1.0000, ASD 0.2130
-patient022: RV: Dice 0.2026, Jc 0.1127, HD95 93.6696, ASD 49.3659, Myo: Dice 0.3019, Jc 0.1778, HD95 63.6396, ASD 25.9741, LV: Dice 0.9157, Jc 0.8445, HD95 1.0000, ASD 0.2604
-patient024: RV: Dice 0.3546, Jc 0.2155, HD95 83.2661, ASD 32.3513, Myo: Dice 0.6522, Jc 0.4839, HD95 28.6531, ASD 8.5484, LV: Dice 0.8226, Jc 0.6987, HD95 26.2869, ASD 4.9059
-patient033: RV: Dice 0.0668, Jc 0.0345, HD95 122.6621, ASD 52.1262, Myo: Dice 0.3102, Jc 0.1835, HD95 124.2014, ASD 55.2420, LV: Dice 0.7881, Jc 0.6503, HD95 4.6796, ASD 1.5966
-patient052: RV: Dice 0.1804, Jc 0.0991, HD95 101.8136, ASD 48.9636, Myo: Dice 0.6288, Jc 0.4585, HD95 93.7934, ASD 16.0322, LV: Dice 0.8726, Jc 0.7740, HD95 2.2361, ASD 0.8112
-patient059: RV: Dice 0.1340, Jc 0.0718, HD95 75.1688, ASD 31.8389, Myo: Dice 0.2899, Jc 0.1695, HD95 102.9369, ASD 46.4560, LV: Dice 0.8860, Jc 0.7953, HD95 2.0000, ASD 0.7631
-patient064: RV: Dice 0.4843, Jc 0.3195, HD95 89.2779, ASD 31.6561, Myo: Dice 0.6257, Jc 0.4553, HD95 26.1916, ASD 7.1131, LV: Dice 0.9223, Jc 0.8558, HD95 1.0000, ASD 0.9023
-patient065: RV: Dice 0.2541, Jc 0.1455, HD95 101.4359, ASD 51.5289, Myo: Dice 0.4900, Jc 0.3245, HD95 34.5543, ASD 9.1722, LV: Dice 0.8845, Jc 0.7929, HD95 2.0000, ASD 0.5572
-patient066: RV: Dice 0.4768, Jc 0.3130, HD95 96.0591, ASD 36.6858, Myo: Dice 0.4864, Jc 0.3213, HD95 72.7685, ASD 20.5971, LV: Dice 0.8798, Jc 0.7854, HD95 3.7417, ASD 1.3917
-patient068: RV: Dice 0.7756, Jc 0.6334, HD95 3.4494, ASD 1.0810, Myo: Dice 0.3110, Jc 0.1841, HD95 100.0652, ASD 27.6272, LV: Dice 0.8396, Jc 0.7236, HD95 5.0990, ASD 1.4948
-patient075: RV: Dice 0.4509, Jc 0.2911, HD95 78.9418, ASD 38.0685, Myo: Dice 0.6826, Jc 0.5182, HD95 4.1231, ASD 1.5029, LV: Dice 0.9168, Jc 0.8464, HD95 1.4142, ASD 0.4822
-patient080: RV: Dice 0.2100, Jc 0.1173, HD95 102.4021, ASD 53.4231, Myo: Dice 0.4317, Jc 0.2752, HD95 103.0049, ASD 45.0288, LV: Dice 0.9280, Jc 0.8656, HD95 1.0000, ASD 0.2993
-patient081: RV: Dice 0.2423, Jc 0.1379, HD95 82.1523, ASD 37.0946, Myo: Dice 0.3706, Jc 0.2275, HD95 76.0250, ASD 26.7045, LV: Dice 0.8890, Jc 0.8003, HD95 10.2470, ASD 2.4285
-patient083: RV: Dice 0.5358, Jc 0.3660, HD95 56.0268, ASD 20.1715, Myo: Dice 0.4358, Jc 0.2786, HD95 73.4370, ASD 19.7951, LV: Dice 0.7845, Jc 0.6454, HD95 10.6771, ASD 2.7170
-patient084: RV: Dice 0.6007, Jc 0.4293, HD95 46.0869, ASD 14.8893, Myo: Dice 0.4533, Jc 0.2931, HD95 56.4624, ASD 24.0932, LV: Dice 0.8953, Jc 0.8104, HD95 1.4142, ASD 0.4337
-patient093: RV: Dice 0.6023, Jc 0.4309, HD95 30.6920, ASD 8.7653, Myo: Dice 0.5139, Jc 0.3458, HD95 46.7654, ASD 12.9275, LV: Dice 0.8992, Jc 0.8168, HD95 2.4495, ASD 0.9144
+Traceback (most recent call last):
+  File "/home/hongyu/DiffUnder/test.py", line 448, in <module>
+    avg_metrics, mean_metrics = test_acdc(args, cfg)
+                                ^^^^^^^^^^^^^^^^^^^^
+  File "/home/hongyu/DiffUnder/test.py", line 377, in test_acdc
+    model = load_model(args, cfg)
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hongyu/DiffUnder/test.py", line 316, in load_model
+    model = UNet(in_chns=1, class_num=cfg['nclass']).cuda()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/lhy_data/miniconda3/envs/ecai/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1053, in cuda
+    return self._apply(lambda t: t.cuda(device))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/lhy_data/miniconda3/envs/ecai/lib/python3.12/site-packages/torch/nn/modules/module.py", line 903, in _apply
+    module._apply(fn)
+  File "/data/lhy_data/miniconda3/envs/ecai/lib/python3.12/site-packages/torch/nn/modules/module.py", line 903, in _apply
+    module._apply(fn)
+  File "/data/lhy_data/miniconda3/envs/ecai/lib/python3.12/site-packages/torch/nn/modules/module.py", line 903, in _apply
+    module._apply(fn)
+  [Previous line repeated 1 more time]
+  File "/data/lhy_data/miniconda3/envs/ecai/lib/python3.12/site-packages/torch/nn/modules/module.py", line 930, in _apply
+    param_applied = fn(param)
+                    ^^^^^^^^^
+  File "/data/lhy_data/miniconda3/envs/ecai/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1053, in <lambda>
+    return self._apply(lambda t: t.cuda(device))
+                                 ^^^^^^^^^^^^^^
+RuntimeError: CUDA error: out of memory
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
 
-Average metrics per class:
-RV -> Dice: 0.3724, Jaccard: 0.2484, HD95: 81.9273, ASD: 34.7178
-Myo -> Dice: 0.4965, Jaccard: 0.3449, HD95: 57.9202, ASD: 20.2946
-LV -> Dice: 0.8919, Jaccard: 0.8084, HD95: 4.6670, ASD: 1.3021
-
-Mean metrics -> Dice: 0.5870, Jaccard: 0.4672, HD95: 48.1715, ASD: 18.7715
-Updated /home/hongyu/DiffUnder/readme.md -> SoftMatch

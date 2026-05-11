@@ -1,13 +1,17 @@
 #!/bin/bash
 
+#!/bin/bash
+
 set -u
 set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
-SEEDS=(2025 2026 2027)
-LABELS=(5acdc 10acdc 20acdc)
+SEEDS=(2025)
+LABELS=(5acdc 10acdc)
+
+# 默认使用 6 和 7 号卡（如果不传参数的话）
 DEFAULT_GPUS=(6 7)
 EXP_PREFIX="AgScore"
 LOG_ROOT="$ROOT_DIR/logs/agscore_$(date +%Y%m%d_%H%M%S)"
@@ -18,9 +22,10 @@ else
   GPU_IDS=("${DEFAULT_GPUS[@]}")
 fi
 
-if [[ ${#GPU_IDS[@]} -ne 2 ]]; then
-  echo "Usage: $0 [GPU0 GPU1]"
-  echo "Example: $0 6 7"
+# 【修改点】：将 -ne 2 改为 -eq 0，允许任意数量的 GPU
+if [[ ${#GPU_IDS[@]} -eq 0 ]]; then
+  echo "Usage: $0 [GPU_ID_1 GPU_ID_2 ...]"
+  echo "Example: $0 0 1 2 3"
   exit 1
 fi
 
