@@ -42,7 +42,7 @@ def get_parser(datasetname):
     parser.add_argument('--exp', type=str, required=True)
     parser.add_argument('--checkpoint_path', type=str, default='/data/lhy_data/checkpoints_wyy')
     parser.add_argument('--deterministic', type=str, default=False)
-    parser.add_argument('--optimizer', type=str, default='SGD', choices=['SGD', 'AdamW'])
+    parser.add_argument('--optimizer', type=str, default='AdamW', choices=['SGD', 'AdamW'])
     parser.add_argument('--consistency', type=float, default=0.1)
     parser.add_argument('--consistency_rampup', type=float, default=200.0)
     parser.add_argument('--rampup_divisor', type=int, default=150)

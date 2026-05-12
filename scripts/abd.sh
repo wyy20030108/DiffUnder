@@ -17,7 +17,7 @@ run_job() {
     local gpu_id="$1"
     local dataset="$2"
     local seed="$3"
-    local exp_name="${EXP_PREFIX}_${dataset}_seed${seed}-0"
+    local exp_name="${EXP_PREFIX}_${dataset}_seed${seed}-1"
     local log_file="$LOG_DIR/${exp_name}.log"
 
     echo "[$(date '+%F %T')] START gpu=${gpu_id} dataset=${dataset} seed=${seed} log=${log_file}"
