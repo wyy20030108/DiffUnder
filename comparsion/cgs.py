@@ -577,12 +577,7 @@ def main(args, cfg, save_path, cp_path):
     for param in ema_model.parameters():
         param.detach_()
 
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=args.base_lr if args.base_lr is not None else cfg['lr'],
-        momentum=0.9,
-        weight_decay=0.0001,
-    )
+    optimizer = optim.AdamW(model.parameters(), lr=cfg['lr'], betas=(0.9, 0.999), weight_decay=0.01)
 
     logger.info('use {} gpus!'.format(torch.cuda.device_count()))
     logger.info('Total params: {:.3f}M'.format(count_params(model)))
