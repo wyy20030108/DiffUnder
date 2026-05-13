@@ -306,8 +306,6 @@ def main(args, cfg, save_path, cp_path):
     optimizer = AdamW( 
         params=model.parameters(),
         lr=cfg['lr'], betas=(0.9, 0.999), weight_decay=0.01)   
-    # optimizer = SGD(model.parameters(), lr=cfg['lr'],
-    #                       momentum=0.9, weight_decay=0.0001)  # 0.0001
     
     criterion_l = nn.CrossEntropyLoss(ignore_index=255).cuda()
     diceloss = DiceLoss(cfg['nclass']).cuda()
