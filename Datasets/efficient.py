@@ -371,6 +371,29 @@ class BUSISemiDataset(Dataset):
         records.sort(key=lambda item: item['rel_path'])
         return records
 
+    def _get_split_search_roots(self):
+        roots = []
+        split_dir = getattr(self.args, 'split_dir', None)
+        if split_dir:
+            roots.append(os.path.abspath(split_dir))
+
+        roots.append(os.path.abspath(self.root_path))
+
+        parent_dir = os.path.dirname(os.path.abspath(self.root_path))
+        sibling_split_dir = os.path.join(parent_dir, 'busi_splits')
+        roots.append(sibling_split_dir)
+
+        # Preserve order while removing duplicates.
+        unique_roots = []
+        seen = set()
+        for root in roots:
+            normalized = os.path.abspath(root)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_roots.append(normalized)
+        return unique_roots
+
     def _resolve_split_path(self):
         if self.mode == 'train_l':
             candidates = ['train_l.txt', 'labeled.txt', 'train.txt']
@@ -382,10 +405,11 @@ class BUSISemiDataset(Dataset):
             candidates = ['test.txt', 'val.txt']
         else:
             candidates = [f'{self.mode}.txt']
-        for candidate in candidates:
-            split_path = os.path.join(self.root_path, candidate)
-            if os.path.isfile(split_path):
-                return split_path
+        for search_root in self._get_split_search_roots():
+            for candidate in candidates:
+                split_path = os.path.join(search_root, candidate)
+                if os.path.isfile(split_path):
+                    return split_path
         return None
 
     def _parse_split_line(self, line):
@@ -489,6 +513,14 @@ class BUSISemiDataset(Dataset):
                 return records
             _, unlabeled_records = self._split_train_records(split_records if split_records else self.all_records)
             return unlabeled_records
+
+        if self.mode in ['val', 'test', 'val_test']:
+            if split_path is None:
+                raise FileNotFoundError(
+                    f'Missing split file for BUSI mode "{self.mode}" under {self.root_path}. '
+                    'Validation/test modes must not fall back to the full dataset.'
+                )
+            return split_records
 
         if split_records:
             return split_records

@@ -39,3 +39,4 @@ wandb/
 
 # Local runtime files
 *.log
+*.txt
