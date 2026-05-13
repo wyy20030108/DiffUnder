@@ -8,11 +8,11 @@ set -o pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
-SEEDS=(2027)
-LABELS=(10acdc)
+SEEDS=(2025 2027 2026)
+LABELS=(10acdc 5acdc)
 
 # 默认使用 6 和 7 号卡（如果不传参数的话）
-DEFAULT_GPUS=(6 7)
+DEFAULT_GPUS=(7)
 EXP_PREFIX="AgScore"
 LOG_ROOT="$ROOT_DIR/logs/agscore_$(date +%Y%m%d_%H%M%S)"
 

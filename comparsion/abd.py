@@ -411,6 +411,18 @@ def main(args, cfg, save_path, cp_path):
 
         is_best = False
         if iter_num >= total_iters * args.val_start and epoch % args.val_interval == 0:
+            del (
+                img_x, mask_x, img_u_w, img_u_s, ignore_mask, img_x_s, mask_x_s,
+                volume_batch, volume_batch_strong, label_batch, label_batch_strong,
+                outputs1, outputs2, outputs_soft1, outputs_soft2, outputs1_max, outputs2_max,
+                outputs1_unlabel, outputs2_unlabel, pseudo_outputs1, pseudo_outputs2,
+                image_patch_supervised, label_patch_supervised, image_output_supervised_1, image_output_supervised_2,
+                image_patch_last, image_output_1, image_output_2, pseudo_image_output_1, pseudo_image_output_2,
+                loss1, loss2, loss3, loss4, pseudo_supervision1, pseudo_supervision2, pseudo_supervision3, pseudo_supervision4,
+                model1_loss, model2_loss, loss, displaced_target, valid_mask_u, valid_patch_mask
+            )
+            gc.collect()
+            torch.cuda.empty_cache()
             mDice1 = evaluate_model(model1, valloader, cfg, class_names, 'ABD_model1', writer, epoch, logger)
             mDice2 = evaluate_model(model2, valloader, cfg, class_names, 'ABD_model2', writer, epoch, logger)
             if mDice1.item() >= pre_best_dice1:
