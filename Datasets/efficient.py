@@ -511,12 +511,10 @@ class BUSISemiDataset(Dataset):
         
         combined_mask = None
         
-        # 遍历读取该原图对应的所有 mask
         for path in mask_paths:
             with Image.open(path) as mask_img:
                 mask = self._normalize_real_mask(mask_img.convert('L'))
                 
-            # 将多张 mask 按位或 (逻辑融合)
             if combined_mask is None:
                 combined_mask = mask
             else:
@@ -540,14 +538,12 @@ class BUSISemiDataset(Dataset):
         sample = self.name_list[idx]
         image = self._load_image(sample['image_path'])
         
-        # ======== 最关键的拦截：在试图加载 Mask 之前进行安全检查 ========
         if self.mode != 'train_u' and not sample['mask_path']:
             raise FileNotFoundError(
                 f"🚨 致命错误：模型在尝试读取有标签数据时，找不到对应的 Mask！\n"
                 f"原图路径: {sample['image_path']}\n"
                 f"请检查该目录下是否存在以 '{sample['stem']}_' 开头的掩码文件。"
             )
-        # ================================================================
         
         mask = self._build_empty_mask(image) if self.mode == 'train_u' else self._load_mask(sample['mask_path'])
 
@@ -568,7 +564,6 @@ class BUSISemiDataset(Dataset):
                 cutmix_box
             )
 
-        # 验证集/测试集的返回
         return normalize(image, mask)
 
     def __len__(self):
