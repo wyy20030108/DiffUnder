@@ -29,11 +29,12 @@ BUSI_RATIO_MAP = {
 README_METHODS = ['FullSup', 'DHC', 'CPS', 'UniMatch', 'FixMatch', 'SoftMatch', 'RankMatch', 'AgScore', 'CGS', 'ABD', 'ARCO', 'Ours']
 
 
-# python test_busi.py --device 1 --save_pred_root /data/lhy_data/checkpoints_wyy/test/arco_busi --save_model_path /data/lhy_data/checkpoints_wyy/FixMatch_BUSI/Ep200bs8_32busi_seed2025_label16/thresh0.95_FixMatch_new/ep94_m0.222_ema0.182.pth
+# python test_busi.py --device 3 --save_pred_root /data/lhy_data/checkpoints_wyy/test/CPS_busi --save_model_path /data/lhy_data/checkpoints_wyy/FullSup_BUSI/Ep200bs8_BUSI_seed2027_labelAll/thresh0.95_FullSup_32busi_seed2027-1/ep64_m0.374.pth
 def get_parser():
     parser = argparse.ArgumentParser(description='BUSI test script')
+    parser.add_argument('--save_pred', action='store_true', default=False)
     parser.add_argument('--dataset', type=str, default='BUSI')
-    parser.add_argument('--base_dir', type=str, default='/data/lhy_data/BUSI')
+    parser.add_argument('--base_dir', type=str, default='/data/lhy_data/BUSI/Dataset_BUSI_with_GT/without_normal')
     parser.add_argument('--labelnum', type=int, default=100)
     parser.add_argument('--num', type=int, default=None)
     parser.add_argument('--device', type=str, default='cuda:0')
@@ -372,7 +373,7 @@ def add_title_bar(panels, titles, spacer_width=8, title_height=28):
 
 
 def save_prediction_visuals(sample_record, pred, gt, args, cfg):
-    if not args.save_pred_root:
+    if not args.save_pred or not args.save_pred_root:
         return
     visual_path = build_output_paths(sample_record, args.save_pred_root)
     os.makedirs(os.path.dirname(visual_path), exist_ok=True)
@@ -427,7 +428,7 @@ def test_busi(args, cfg):
             raise FileNotFoundError('Found samples without mask while strict_eval_masks is enabled.')
     if not valid_indices:
         raise RuntimeError(f'No valid labeled samples found for split {args.split}.')
-    if args.save_pred_root:
+    if args.save_pred and args.save_pred_root:
         os.makedirs(args.save_pred_root, exist_ok=True)
 
     eval_size = normalize_eval_size(cfg.get('crop_size'))
@@ -452,7 +453,7 @@ def test_busi(args, cfg):
         sample_metrics = np.asarray(sample_metrics, dtype=np.float64)
         total_metrics += sample_metrics
         sample_count += 1
-        if args.save_pred_root:
+        if args.save_pred and args.save_pred_root:
             save_prediction_visuals(sample_record, pred, label, args, cfg)
             saved_visual_count += 1
 
@@ -479,7 +480,7 @@ def test_busi(args, cfg):
             mean_metrics[0], mean_metrics[1], mean_metrics[2], mean_metrics[3]
         )
     )
-    if args.save_pred_root:
+    if args.save_pred and args.save_pred_root:
         print(f'Saved {saved_visual_count} merged visualization images to {args.save_pred_root}')
     return avg_metrics, mean_metrics
 
