@@ -283,6 +283,8 @@ class BUSISemiDataset(Dataset):
         self.root_path = getattr(args, 'base_dir', '/data/lhy_data/BUSI')
         self.labelnum = getattr(args, 'labelnum', None)
         self.num = getattr(args, 'num', None)
+        if isinstance(self.num, str) and self.num.strip().lower() in {'none', 'null', ''}:
+            self.num = None
         self.ratio_range = self._normalize_ratio_range(
             getattr(args, 'ratio_range', getattr(args, 'scale_range', (0.8, 1.2)))
         )
