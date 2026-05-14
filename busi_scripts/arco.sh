@@ -5,9 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/data/lhy_data/checkpoints_wyy}"
 cd "$ROOT_DIR"
 
-GPU_IDS=(5)
-SEEDS=(2025 2026 2027)
-DATASETS=(8busi 16busi 32busi)
+GPU_IDS=(7)
+SEEDS=(2027)
+DATASETS=(16busi)
 EXP_PREFIX="${EXP_PREFIX:-ARCO}"
 LOG_DIR="${LOG_DIR:-$CHECKPOINT_ROOT/logs/ARCO}"
 
