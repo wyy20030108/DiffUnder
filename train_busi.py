@@ -29,7 +29,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from Datasets.efficient import ACDCsemiDataset, TwoStreamBatchSampler, mix_collate_fn
+from Datasets.efficient import BUSISemiDataset, TwoStreamBatchSampler, mix_collate_fn
 from models.unet2d import UNet
 from utils.classes import CLASSES
 from utils.datasets import DATASET_CONFIGS
@@ -301,10 +301,10 @@ def select_best_inference_checkpoint(cp_path, prefer_ema=False):
     raise FileNotFoundError(f'Cannot find any checkpoint under {cp_path}')
 
 
-def run_post_training_acdc_inference(args, cfg, cp_path, logger, best_model_score, best_ema_score):
-    from test import build_fixed_cfg as build_eval_cfg
-    from test import test_acdc as run_test_acdc
-    from test import update_readme_results
+def run_post_training_busi_inference(args, cfg, cp_path, logger, best_model_score, best_ema_score):
+    from test_busi import build_fixed_cfg as build_eval_cfg
+    from test_busi import test_busi as run_test_busi
+    from test_busi import update_readme_results
 
     prefer_ema = best_ema_score >= best_model_score
     best_ckpt_path, use_ema, checkpoint_source = select_best_inference_checkpoint(cp_path, prefer_ema=prefer_ema)
@@ -319,12 +319,17 @@ def run_post_training_acdc_inference(args, cfg, cp_path, logger, best_model_scor
         dataset=cfg['dataset'],
         base_dir=args.base_dir,
         labelnum=args.labelnum,
+        num=args.num,
         device=args.device,
         seed=args.seed,
         split=args.auto_test_split,
         save_model_path=best_ckpt_path,
         use_ema=use_ema,
         nclass=cfg['nclass'],
+        crop_size=cfg.get('crop_size'),
+        strict_eval_masks=False,
+        save_pred=False,
+        save_pred_root=args.auto_test_save_pred_root,
         readme_path=args.readme_path,
         readme_method=method_name,
         skip_readme_update=True,
@@ -340,7 +345,7 @@ def run_post_training_acdc_inference(args, cfg, cp_path, logger, best_model_scor
         best_ema_score,
         method_name,
     )
-    avg_metrics, mean_metrics = run_test_acdc(eval_args, eval_cfg)
+    avg_metrics, mean_metrics = run_test_busi(eval_args, eval_cfg)
 
     if args.auto_update_readme:
         update_readme_results(
@@ -858,7 +863,7 @@ def main(args, cfg, save_path, cp_path):
     logger.info('{}\n'.format(pprint.pformat(all_args)))
     writer = SummaryWriter(save_path)
 
-    model = UNet(in_chns=1, class_num=cfg['nclass']).cuda()
+    model = UNet(in_chns=3, class_num=cfg['nclass']).cuda()
     ema_model = deepcopy(model).cuda()
     for param in ema_model.parameters():
         param.detach_()
@@ -889,9 +894,9 @@ def main(args, cfg, save_path, cp_path):
     logger.info('Total params: {:.3f}M'.format(count_params(model)))
     logger.info('Ablation: %s -> %s', args.ablation_id, args.ablation_desc)
 
-    trainset_u = ACDCsemiDataset('train_u', args, cfg['crop_size'])
-    trainset_l = ACDCsemiDataset('train_l', args, cfg['crop_size'])
-    valset = ACDCsemiDataset('val', args, cfg['crop_size'])
+    trainset_u = BUSISemiDataset('train_u', args, cfg['crop_size'])
+    trainset_l = BUSISemiDataset('train_l', args, cfg['crop_size'])
+    valset = BUSISemiDataset('val', args, cfg['crop_size'])
     valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=1, drop_last=False)
 
     labeled_bs = cfg['batch_size']
@@ -1401,7 +1406,7 @@ def main(args, cfg, save_path, cp_path):
     torch.cuda.empty_cache()
 
     if args.auto_test_after_train:
-        run_post_training_acdc_inference(
+        run_post_training_busi_inference(
             args=args,
             cfg=cfg,
             cp_path=cp_path,
