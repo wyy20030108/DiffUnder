@@ -29,7 +29,7 @@ BUSI_RATIO_MAP = {
 README_METHODS = ['FullSup', 'DHC', 'CPS', 'UniMatch', 'FixMatch', 'SoftMatch', 'RankMatch', 'AgScore', 'CGS', 'ABD', 'ARCO', 'Ours']
 
 
-# python test_busi.py --device 3 --save_pred_root /data/lhy_data/checkpoints_wyy/test/CPS_busi --save_model_path /data/lhy_data/checkpoints_wyy/AgScore_BUSI/Ep200bs8_BUSI_seed2027_label16/thresh0.95_AgScore_32busi_seed2027-efficient/best_ema.pth
+# python test_busi.py --device 3 --save_pred_root /data/lhy_data/checkpoints_wyy/test/CPS_busi --save_model_path /data/lhy_data/checkpoints_wyy/ARCO_BUSI/Ep200bs8_BUSI_seed2027_label16/ARCO-adamw/ep84_m0.257_ema0.347.pth --use_ema
 def get_parser():
     parser = argparse.ArgumentParser(description='BUSI test script')
     parser.add_argument('--save_pred', action='store_true', default=False)
