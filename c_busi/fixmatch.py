@@ -31,7 +31,7 @@ from utils.val import eval_2d
 
 DEFAULT_BUSI_CFG = {
     'dataset': 'BUSI',
-    'base_dir': '/data/lhy_data/BUSI',
+    'base_dir': '/data/lhy_data/BUSI/Dataset_BUSI_with_GT/without_normal',
     'labelnum': 100,
     'label_help': 'number of labeled BUSI images',
     'num': None,
