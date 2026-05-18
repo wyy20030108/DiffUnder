@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 
 GPU_IDS=(5)
 SEEDS=(2025 2026 2027)
-DATASETS=(8busi 16busi 32busi)
+DATASETS=(32busi)
 EXP_PREFIX="${EXP_PREFIX:-AUOT_busi}"
 LOG_DIR="${LOG_DIR:-$CHECKPOINT_ROOT/logs/AUOT_busi}"
 
@@ -17,7 +17,7 @@ run_job() {
     local gpu_id="$1"
     local dataset="$2"
     local seed="$3"
-    local exp_name="${EXP_PREFIX}_${dataset}_seed${seed}-efficient"
+    local exp_name="${EXP_PREFIX}_${dataset}_seed${seed}-efficient-0"
     local log_file="$LOG_DIR/${exp_name}.log"
 
     echo "[$(date '+%F %T')] START gpu=${gpu_id} dataset=${dataset} seed=${seed} log=${log_file}"
